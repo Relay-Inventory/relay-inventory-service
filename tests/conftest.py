@@ -10,6 +10,9 @@ from freezegun import freeze_time
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 DEFAULT_ENV = {
     "AWS_ACCESS_KEY_ID": "test-access-key",
@@ -40,7 +43,10 @@ def _test_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def stubbed_boto3_session(monkeypatch):
+def stubbed_boto3_session(monkeypatch, request):
+    if "relay_inventory" in request.node.nodeid:
+        yield None
+        return
     import boto3
 
     class _StubSession:

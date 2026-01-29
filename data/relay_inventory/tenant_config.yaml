@@ -1,0 +1,63 @@
+schema_version: 1
+tenant_id: "test_tenant"
+timezone: "America/Los_Angeles"
+default_currency: "USD"
+
+vendors:
+  - vendor_id: "vendor_1"
+    inbound:
+      type: "local"
+    parser:
+      format: "csv"
+      delimiter: ","
+      encoding: "utf-8"
+      column_map:
+        sku: "SKU"
+        quantity_available: "QTY"
+        cost: "COST"
+        map_price: "MAP"
+    sku_map:
+      type: "file"
+      local_path: "data/relay_inventory/sku_map_vendor_1.csv"
+  - vendor_id: "vendor_2"
+    inbound:
+      type: "local"
+    parser:
+      format: "csv"
+      delimiter: ","
+      encoding: "utf-8"
+      column_map:
+        sku: "SKU"
+        quantity_available: "QTY"
+        cost: "COST"
+        map_price: "MAP"
+
+pricing:
+  base_margin_pct: 0.20
+  min_price: 25.00
+  shipping_handling_flat: 9.99
+  map_policy:
+    enforce: true
+    map_floor_behavior: "max(price, map_price)"
+  rounding:
+    mode: "nearest"
+    increment: 0.99
+
+merge:
+  strategy: "best_offer"
+  best_offer:
+    sort_by:
+      - "in_stock_desc"
+      - "lowest_landed_cost"
+    landed_cost:
+      include_shipping_handling: true
+    fallback_lead_time_days: 7
+
+output:
+  format: "csv"
+  columns:
+    - sku
+    - quantity_available
+    - price
+    - vendor_id
+    - updated_at

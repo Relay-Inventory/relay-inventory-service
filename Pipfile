@@ -26,6 +26,10 @@ typing-extensions = "*"
 pypdf = "*"
 chromedriver-autoinstaller = "*"
 selenium = "*"
+pydantic = "*"
+pyyaml = "*"
+fastapi = "*"
+uvicorn = "*"
 
 [dev-packages]
 pytest = "*"
