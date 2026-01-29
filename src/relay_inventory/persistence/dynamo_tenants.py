@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 
 @dataclass
@@ -31,8 +32,7 @@ class DynamoTenants:
 
     def get_latest(self, tenant_id: str) -> Optional[TenantRecord]:
         response = self.table.query(
-            KeyConditionExpression="tenant_id = :tenant_id",
-            ExpressionAttributeValues={":tenant_id": tenant_id},
+            KeyConditionExpression=Key("tenant_id").eq(tenant_id),
             ScanIndexForward=False,
             Limit=1,
         )
