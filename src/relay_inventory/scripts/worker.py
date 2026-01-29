@@ -58,8 +58,11 @@ class Worker:
         errors: List[ParseError] = []
         artifacts: Dict[str, str] = {}
         vendor_counts: Dict[str, int] = {}
+        total_rows = 0
+        warnings: List[str] = []
         start_time = datetime.utcnow()
         stage_times: Dict[str, float] = {}
+        error_policy = config.error_policy
 
         ingest_start = datetime.utcnow()
         for vendor in config.vendors:
@@ -84,7 +87,20 @@ class Worker:
                     column_map=vendor.parser.column_map,
                 )
             except ValueError as exc:
-                raise NonRetryableError(str(exc)) from exc
+                if "missing columns:" in str(exc).lower():
+                    if error_policy.fail_on_missing_required_columns:
+                        raise NonRetryableError(str(exc)) from exc
+                    errors.append(
+                        ParseError(
+                            row_number=0,
+                            reason=str(exc),
+                            row_data={"vendor": vendor.vendor_id},
+                        )
+                    )
+                    records = []
+                    vendor_errors = []
+                else:
+                    raise NonRetryableError(str(exc)) from exc
             if vendor.sku_map and vendor.sku_map.s3_key:
                 try:
                     sku_text = self.s3.download_text(vendor.sku_map.s3_key)
@@ -95,6 +111,7 @@ class Worker:
             all_records.extend(records)
             errors.extend(vendor_errors)
             vendor_counts[vendor.vendor_id] = len(records)
+            total_rows += len(records) + len(vendor_errors)
 
             normalized_key = (
                 f"tenants/{config.tenant_id}/normalized/{vendor.vendor_id}/{job.run_id}/normalized.csv"
@@ -112,6 +129,7 @@ class Worker:
             artifacts[f"normalized_{vendor.vendor_id}"] = normalized_key
         stage_times["ingest_seconds"] = (datetime.utcnow() - ingest_start).total_seconds()
 
+        error_key = None
         if errors:
             error_key = f"tenants/{config.tenant_id}/reports/{job.run_id}/errors.json"
             try:
@@ -121,15 +139,37 @@ class Worker:
                 )
             except (BotoCoreError, ClientError) as exc:
                 raise RetryableError(str(exc)) from exc
+            artifacts["errors"] = error_key
+
+        invalid_rows = len(errors)
+        if total_rows == 0:
             self.runs.update_status(
                 job.run_id,
                 "FAILED",
                 completed_at=datetime.utcnow(),
-                error_report_key=error_key,
+                error_report_key=error_key or "no_rows_parsed",
+                artifacts=artifacts,
+            )
+            log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
+            raise NonRetryableError("no rows parsed")
+
+        exceeds_row_count = invalid_rows > error_policy.max_invalid_rows
+        exceeds_row_pct = (invalid_rows / total_rows) > error_policy.max_invalid_row_pct
+        if invalid_rows and (exceeds_row_count or exceeds_row_pct):
+            self.runs.update_status(
+                job.run_id,
+                "FAILED",
+                completed_at=datetime.utcnow(),
+                error_report_key=error_key or "validation_errors",
                 artifacts=artifacts,
             )
             log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
             raise NonRetryableError("validation errors")
+
+        if invalid_rows:
+            warnings.append(
+                "invalid_rows_within_threshold"
+            )
 
         if config.merge.strategy != "best_offer" or not config.merge.best_offer:
             raise NonRetryableError("unsupported merge strategy")
@@ -189,6 +229,8 @@ class Worker:
             "record_count": len(priced),
             "vendor_record_counts": vendor_counts,
             "invalid_rows": len(errors),
+            "total_rows": total_rows,
+            "warnings": warnings,
             "duration_seconds": duration_seconds,
             "stage_times": stage_times,
             "completed_at": completed_at.isoformat(),
