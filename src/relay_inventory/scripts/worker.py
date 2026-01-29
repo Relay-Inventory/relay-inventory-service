@@ -47,16 +47,28 @@ class Worker:
             )
             raise NonRetryableError("missing tenant config")
         config = TenantConfig.model_validate(tenant_record.config)
-        if config.schema_version != 1:
-            raise NonRetryableError(f"unsupported schema_version {config.schema_version}")
-
         artifacts: Dict[str, str] = {}
         warnings: List[str] = []
         start_time = datetime.utcnow()
         stage_times: Dict[str, float] = {}
         error_policy = config.error_policy
+        reports_prefix = f"tenants/{config.tenant_id}/reports/{job.run_id}"
+
+        config_snapshot_key = f"{reports_prefix}/config_snapshot.json"
+        config_snapshot = {
+            "run_id": job.run_id,
+            "tenant_id": job.tenant_id,
+            "config_version": job.config_version,
+            "tenant_config": config.model_dump(),
+        }
+        try:
+            self.s3.upload_text(config_snapshot_key, json.dumps(config_snapshot))
+        except (BotoCoreError, ClientError) as exc:
+            raise RetryableError(str(exc)) from exc
+        artifacts["config_snapshot"] = config_snapshot_key
 
         vendor_inputs: Dict[str, bytes] = {}
+        vendor_latest: Dict[str, dict] = {}
         ingest_start = datetime.utcnow()
         for vendor in config.vendors:
             prefix = vendor.inbound.s3_prefix or ""
@@ -65,7 +77,21 @@ class Worker:
             except (BotoCoreError, ClientError) as exc:
                 raise RetryableError(str(exc)) from exc
             if not latest:
+                vendor_latest[vendor.vendor_id] = {
+                    "status": "missing",
+                    "s3_prefix": prefix,
+                    "reason": "no_objects_found",
+                }
                 continue
+            vendor_latest[vendor.vendor_id] = {
+                "status": "found",
+                "s3_prefix": prefix,
+                "s3_key": latest.key,
+                "etag": latest.etag,
+                "size": latest.size,
+                "last_modified": latest.last_modified.isoformat() if latest.last_modified else None,
+                "selection": "latest_by_last_modified",
+            }
             try:
                 raw_text = self.s3.download_text(latest.key)
             except (BotoCoreError, ClientError) as exc:
@@ -79,6 +105,30 @@ class Worker:
                 vendor_inputs[sku_map_input_key(vendor.vendor_id)] = sku_text.encode("utf-8")
         stage_times["ingest_seconds"] = (datetime.utcnow() - ingest_start).total_seconds()
 
+        input_manifest_key = f"{reports_prefix}/input_manifest.json"
+        input_manifest = {
+            "run_id": job.run_id,
+            "tenant_id": job.tenant_id,
+            "config_version": job.config_version,
+            "generated_at": datetime.utcnow().isoformat(),
+            "vendors": vendor_latest,
+        }
+        try:
+            self.s3.upload_text(input_manifest_key, json.dumps(input_manifest))
+        except (BotoCoreError, ClientError) as exc:
+            raise RetryableError(str(exc)) from exc
+        artifacts["input_manifest"] = input_manifest_key
+
+        if config.schema_version != 1:
+            self.runs.update_status(
+                job.run_id,
+                "FAILED",
+                completed_at=datetime.utcnow(),
+                error_report_key=f"unsupported schema_version {config.schema_version}",
+                artifacts=artifacts,
+            )
+            raise NonRetryableError(f"unsupported schema_version {config.schema_version}")
+
         engine_start = datetime.utcnow()
         try:
             engine_result = run_inventory_sync(
@@ -88,8 +138,22 @@ class Worker:
                 now=engine_start,
             )
         except MissingRequiredColumnsError as exc:
+            self.runs.update_status(
+                job.run_id,
+                "FAILED",
+                completed_at=datetime.utcnow(),
+                error_report_key=str(exc),
+                artifacts=artifacts,
+            )
             raise NonRetryableError(str(exc)) from exc
         except ValueError as exc:
+            self.runs.update_status(
+                job.run_id,
+                "FAILED",
+                completed_at=datetime.utcnow(),
+                error_report_key=str(exc),
+                artifacts=artifacts,
+            )
             raise NonRetryableError(str(exc)) from exc
         stage_times["engine_seconds"] = (datetime.utcnow() - engine_start).total_seconds()
 

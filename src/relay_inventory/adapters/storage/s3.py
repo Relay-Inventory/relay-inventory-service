@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable, Optional
 
 import boto3
@@ -10,6 +11,9 @@ import boto3
 class S3Location:
     bucket: str
     key: str
+    etag: Optional[str] = None
+    size: Optional[int] = None
+    last_modified: Optional[datetime] = None
 
 
 class S3Adapter:
@@ -23,7 +27,13 @@ class S3Adapter:
         if not contents:
             return None
         latest = max(contents, key=lambda item: item["LastModified"])
-        return S3Location(bucket=self.bucket, key=latest["Key"])
+        return S3Location(
+            bucket=self.bucket,
+            key=latest["Key"],
+            etag=latest.get("ETag"),
+            size=latest.get("Size"),
+            last_modified=latest.get("LastModified"),
+        )
 
     def download_text(self, key: str) -> str:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
