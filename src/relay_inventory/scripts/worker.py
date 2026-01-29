@@ -11,6 +11,7 @@ from relay_inventory.adapters.queue.sqs import SqsAdapter
 from relay_inventory.adapters.storage.s3 import S3Adapter
 from relay_inventory.app.jobs.schema import RunJob
 from relay_inventory.app.models.config import TenantConfig
+from relay_inventory.engine.canonical.io import write_csv_bytes
 from relay_inventory.engine.canonical.models import CANONICAL_COLUMNS, InventoryRecord
 from relay_inventory.engine.merge.best_offer import BestOfferConfig, LandedCostConfig, merge_best_offer
 from relay_inventory.engine.normalize.sku_map import load_sku_map_from_text
@@ -98,14 +99,14 @@ class Worker:
             normalized_key = (
                 f"tenants/{config.tenant_id}/normalized/{vendor.vendor_id}/{job.run_id}/normalized.csv"
             )
-            normalized_lines = [",".join(CANONICAL_COLUMNS) + "\n"]
-            for record in records:
-                row = record.model_dump()
-                normalized_lines.append(
-                    ",".join(str(row.get(col, "")) for col in CANONICAL_COLUMNS) + "\n"
-                )
+            normalized_rows = [record.model_dump() for record in records]
+            normalized_bytes = write_csv_bytes(
+                normalized_rows,
+                CANONICAL_COLUMNS,
+                extrasaction="raise",
+            )
             try:
-                self.s3.upload_lines(normalized_key, normalized_lines)
+                self.s3.upload_bytes(normalized_key, normalized_bytes)
             except (BotoCoreError, ClientError) as exc:
                 raise RetryableError(str(exc)) from exc
             artifacts[f"normalized_{vendor.vendor_id}"] = normalized_key
@@ -164,12 +165,14 @@ class Worker:
         output_start = datetime.utcnow()
         output_key = f"tenants/{config.tenant_id}/outputs/{job.run_id}/merged_inventory.csv"
         output_columns = config.output.columns or CANONICAL_COLUMNS
-        lines = [",".join(output_columns) + "\n"]
-        for record in priced:
-            row = record.model_dump()
-            lines.append(",".join(str(row.get(col, "")) for col in output_columns) + "\n")
+        output_rows = [record.model_dump() for record in priced]
+        output_bytes = write_csv_bytes(
+            output_rows,
+            output_columns,
+            extrasaction="ignore",
+        )
         try:
-            self.s3.upload_lines(output_key, lines)
+            self.s3.upload_bytes(output_key, output_bytes)
         except (BotoCoreError, ClientError) as exc:
             raise RetryableError(str(exc)) from exc
         artifacts["merged_inventory"] = output_key
