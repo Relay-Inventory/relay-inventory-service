@@ -69,6 +69,15 @@ class OutputConfig(BaseModel):
     columns: List[str]
 
 
+class ErrorPolicy(BaseModel):
+    max_invalid_rows: int = 0
+    max_invalid_row_pct: float = Field(
+        default=0.0,
+        description="Maximum invalid row ratio (0.0-1.0).",
+    )
+    fail_on_missing_required_columns: bool = True
+
+
 class TenantConfig(BaseModel):
     schema_version: int = 1
     tenant_id: str
@@ -78,3 +87,4 @@ class TenantConfig(BaseModel):
     pricing: PricingConfig
     merge: MergeConfig
     output: OutputConfig
+    error_policy: ErrorPolicy = Field(default_factory=ErrorPolicy)
