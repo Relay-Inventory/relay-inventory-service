@@ -44,10 +44,20 @@ class InMemoryRuns:
     def create(self, record: RunRecord) -> None:
         self._data[record.run_id] = record
 
-    def update_status(self, run_id: str, status: str, **kwargs: object) -> None:
+    def update_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        clear_fields: Optional[list[str]] = None,
+        **kwargs: object,
+    ) -> None:
         record = self._data[run_id]
         for key, value in kwargs.items():
             setattr(record, key, value)
+        if clear_fields:
+            for field in clear_fields:
+                setattr(record, field, None)
         record.status = status
 
     def get(self, run_id: str) -> Optional[RunRecord]:
@@ -154,14 +164,23 @@ async def get_run(run_id: str) -> RunStatus:
         tenant_id=record.tenant_id,
         config_version=record.config_version,
         status=record.status,
+        stage=getattr(record, "stage", None),
         requested_at=datetime.fromisoformat(record.requested_at),
         started_at=datetime.fromisoformat(record.started_at)
         if record.started_at
         else None,
-        completed_at=datetime.fromisoformat(record.completed_at)
-        if record.completed_at
-        else None,
-        error_report_key=record.error_report_key,
+        finished_at=(
+            datetime.fromisoformat(record.finished_at)
+            if getattr(record, "finished_at", None)
+            else datetime.fromisoformat(record.completed_at)
+            if getattr(record, "completed_at", None)
+            else None
+        ),
+        failed_stage=getattr(record, "failed_stage", None),
+        error_code=getattr(record, "error_code", None),
+        error_message=getattr(record, "error_message", None),
+        errors_artifact_key=getattr(record, "errors_artifact_key", None),
+        error_report_key=getattr(record, "error_report_key", None),
         artifacts=record.artifacts or {},
     )
 
