@@ -1,11 +1,12 @@
 import json
+from datetime import datetime
 
 import boto3
 import pytest
 from moto import mock_aws
 
 from relay_inventory.app.jobs.schema import RunJob
-from relay_inventory.persistence.dynamo_runs import DynamoRuns
+from relay_inventory.persistence.dynamo_runs import DynamoRuns, RunRecord
 from relay_inventory.persistence.dynamo_tenants import DynamoTenants, TenantRecord
 from relay_inventory.scripts.worker import Worker
 from relay_inventory.util.errors import NonRetryableError
@@ -95,6 +96,19 @@ def _upload_csv(bucket: str, key: str, csv_data: str) -> None:
     client.put_object(Bucket=bucket, Key=key, Body=csv_data.encode("utf-8"))
 
 
+def _create_run_record(table_name: str, run_id: str) -> None:
+    runs = DynamoRuns(table_name)
+    runs.create(
+        RunRecord(
+            run_id=run_id,
+            tenant_id="tenant-a",
+            config_version=1,
+            status="QUEUED",
+            requested_at=datetime.utcnow().isoformat(),
+        )
+    )
+
+
 def _create_worker(bucket: str, runs_table: str, tenants_table: str) -> Worker:
     return Worker(bucket=bucket, runs_table=runs_table, tenants_table=tenants_table)
 
@@ -102,6 +116,7 @@ def _create_worker(bucket: str, runs_table: str, tenants_table: str) -> Worker:
 def test_invalid_rows_under_threshold_succeeds(s3_bucket, dynamodb_tables):
     config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.6})
     _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-1")
     csv_data = "sku,quantity_available,price\nSKU1,10,5.00\nSKU2,not-a-number,4.00\n"
     _upload_csv(s3_bucket, "vendor-a/input.csv", csv_data)
     worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
@@ -113,10 +128,11 @@ def test_invalid_rows_under_threshold_succeeds(s3_bucket, dynamodb_tables):
     record = runs.get("run-1")
     assert record is not None
     assert record.status == "SUCCEEDED"
+    assert record.finished_at is not None
 
     client = boto3.client("s3", region_name="us-east-1")
     errors_obj = client.get_object(
-        Bucket=s3_bucket, Key="tenants/tenant-a/reports/run-1/errors.json"
+        Bucket=s3_bucket, Key="run-1/tenants/tenant-a/reports/errors.json"
     )
     errors = json.loads(errors_obj["Body"].read().decode("utf-8"))
     assert len(errors) == 1
@@ -125,6 +141,7 @@ def test_invalid_rows_under_threshold_succeeds(s3_bucket, dynamodb_tables):
 def test_invalid_rows_exceed_threshold_fails(s3_bucket, dynamodb_tables):
     config = _base_config({"max_invalid_rows": 0, "max_invalid_row_pct": 0.1})
     _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-2")
     csv_data = "sku,quantity_available,price\nSKU1,10,5.00\nSKU2,not-a-number,4.00\n"
     _upload_csv(s3_bucket, "vendor-a/input.csv", csv_data)
     worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
@@ -137,12 +154,15 @@ def test_invalid_rows_exceed_threshold_fails(s3_bucket, dynamodb_tables):
     record = runs.get("run-2")
     assert record is not None
     assert record.status == "FAILED"
-    assert record.error_report_key == "tenants/tenant-a/reports/run-2/errors.json"
+    assert record.failed_stage == "MERGE_PRICE"
+    assert record.error_code == "validation_errors"
+    assert record.errors_artifact_key == "run-2/tenants/tenant-a/reports/errors.json"
 
 
 def test_missing_required_columns_fails_fast(s3_bucket, dynamodb_tables):
     config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.5})
     _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-3")
     csv_data = "sku,price\nSKU1,5.00\n"
     _upload_csv(s3_bucket, "vendor-a/input.csv", csv_data)
     worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
@@ -150,3 +170,38 @@ def test_missing_required_columns_fails_fast(s3_bucket, dynamodb_tables):
     job = RunJob(run_id="run-3", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
     with pytest.raises(NonRetryableError, match="missing columns"):
         worker.run_job(job)
+
+
+def test_retry_keeps_stage_monotonic_and_artifact_prefix(s3_bucket, dynamodb_tables):
+    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.5})
+    _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-4")
+    worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
+
+    job = RunJob(run_id="run-4", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
+    with pytest.raises(NonRetryableError, match="no rows parsed"):
+        worker.run_job(job)
+
+    runs = DynamoRuns(dynamodb_tables["runs"])
+    first = runs.get("run-4")
+    assert first is not None
+    assert first.status == "FAILED"
+    assert first.failed_stage == "MERGE_PRICE"
+    assert first.errors_artifact_key == "run-4/tenants/tenant-a/reports/errors.json"
+
+    csv_data = "sku,quantity_available,price\nSKU1,10,5.00\n"
+    _upload_csv(s3_bucket, "vendor-a/input.csv", csv_data)
+
+    worker.run_job(job)
+    second = runs.get("run-4")
+    assert second is not None
+    assert second.status == "SUCCEEDED"
+    assert second.stage == "COMPLETE"
+
+    stages = ["FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
+    assert stages.index(first.stage) <= stages.index(second.stage)
+    assert second.finished_at is not None
+    assert second.failed_stage is None
+    assert second.errors_artifact_key is None
+    for key in (second.artifacts or {}).values():
+        assert key.startswith("run-4/")

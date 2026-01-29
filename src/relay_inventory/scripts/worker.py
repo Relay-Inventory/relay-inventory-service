@@ -34,16 +34,96 @@ class Worker:
         self.queue = SqsAdapter(queue_url) if queue_url else None
         self.logger = get_logger(self.__class__.__name__)
 
+    def _stage_index(self, stage: str) -> int:
+        stages = ["FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
+        return stages.index(stage)
+
+    def _coerce_stage(self, run_id: str, stage: str | None) -> str | None:
+        if not stage or not hasattr(self.runs, "get"):
+            return stage
+        record = self.runs.get(run_id)
+        current = getattr(record, "stage", None) if record else None
+        if not current:
+            return stage
+        if self._stage_index(stage) < self._stage_index(current):
+            return current
+        return stage
+
+    def _update_run_status(self, run_id: str, status: str, **kwargs: object) -> None:
+        stage = kwargs.get("stage")
+        if stage:
+            kwargs["stage"] = self._coerce_stage(run_id, stage)
+        if "started_at" in kwargs and hasattr(self.runs, "get"):
+            record = self.runs.get(run_id)
+            if record and getattr(record, "started_at", None):
+                kwargs.pop("started_at")
+        self.runs.update_status(run_id, status, **kwargs)
+
+    def _run_prefix(self, *, run_id: str, tenant_id: str) -> str:
+        return f"{run_id}/tenants/{tenant_id}"
+
+    def _ensure_run_prefix(self, *, run_id: str, key: str) -> None:
+        if not key.startswith(f"{run_id}/"):
+            raise ValueError(f"artifact key must be under {run_id}/ prefix: {key}")
+
+    def _write_error_report(self, *, run_id: str, tenant_id: str, errors: list[dict]) -> str:
+        errors_key = f"{self._run_prefix(run_id=run_id, tenant_id=tenant_id)}/reports/errors.json"
+        self._ensure_run_prefix(run_id=run_id, key=errors_key)
+        try:
+            self.s3.upload_text(errors_key, json.dumps(errors, default=str))
+        except (BotoCoreError, ClientError) as exc:
+            raise RetryableError(str(exc)) from exc
+        return errors_key
+
+    def _fail_run(
+        self,
+        *,
+        job: RunJob,
+        status: str,
+        stage: str,
+        error_code: str,
+        error_message: str,
+        artifacts: Dict[str, str],
+        errors_key: str | None,
+    ) -> None:
+        if not errors_key:
+            errors_key = self._write_error_report(
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                errors=[{"error_code": error_code, "error_message": error_message}],
+            )
+        artifacts.setdefault("errors", errors_key)
+        self._update_run_status(
+            job.run_id,
+            status,
+            stage=stage,
+            finished_at=datetime.utcnow(),
+            failed_stage=stage,
+            error_code=error_code,
+            error_message=error_message,
+            errors_artifact_key=errors_key,
+            error_report_key=errors_key,
+            artifacts=artifacts,
+        )
+
     def run_job(self, job: RunJob) -> None:
         log_event(self.logger, "run_started", run_id=job.run_id, tenant_id=job.tenant_id)
-        self.runs.update_status(job.run_id, "RUNNING", started_at=datetime.utcnow())
+        self._update_run_status(
+            job.run_id,
+            "RUNNING",
+            started_at=datetime.utcnow(),
+            stage="FETCH_INPUTS",
+        )
         tenant_record = self.tenants.get(job.tenant_id, job.config_version)
         if not tenant_record:
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key="missing_tenant_config",
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="FETCH_INPUTS",
+                error_code="missing_tenant_config",
+                error_message="missing tenant config",
+                artifacts={},
+                errors_key=None,
             )
             raise NonRetryableError("missing tenant config")
         config = TenantConfig.model_validate(tenant_record.config)
@@ -52,9 +132,11 @@ class Worker:
         start_time = datetime.utcnow()
         stage_times: Dict[str, float] = {}
         error_policy = config.error_policy
-        reports_prefix = f"tenants/{config.tenant_id}/reports/{job.run_id}"
+        run_prefix = self._run_prefix(run_id=job.run_id, tenant_id=config.tenant_id)
+        reports_prefix = f"{run_prefix}/reports"
 
         config_snapshot_key = f"{reports_prefix}/config_snapshot.json"
+        self._ensure_run_prefix(run_id=job.run_id, key=config_snapshot_key)
         config_snapshot = {
             "run_id": job.run_id,
             "tenant_id": job.tenant_id,
@@ -106,6 +188,7 @@ class Worker:
         stage_times["ingest_seconds"] = (datetime.utcnow() - ingest_start).total_seconds()
 
         input_manifest_key = f"{reports_prefix}/input_manifest.json"
+        self._ensure_run_prefix(run_id=job.run_id, key=input_manifest_key)
         input_manifest = {
             "run_id": job.run_id,
             "tenant_id": job.tenant_id,
@@ -120,16 +203,20 @@ class Worker:
         artifacts["input_manifest"] = input_manifest_key
 
         if config.schema_version != 1:
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key=f"unsupported schema_version {config.schema_version}",
+            error_message = f"unsupported schema_version {config.schema_version}"
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="FETCH_INPUTS",
+                error_code="unsupported_schema_version",
+                error_message=error_message,
                 artifacts=artifacts,
+                errors_key=None,
             )
-            raise NonRetryableError(f"unsupported schema_version {config.schema_version}")
+            raise NonRetryableError(error_message)
 
         engine_start = datetime.utcnow()
+        self._update_run_status(job.run_id, "RUNNING", stage="NORMALIZE")
         try:
             engine_result = run_inventory_sync(
                 vendor_inputs=vendor_inputs,
@@ -138,24 +225,31 @@ class Worker:
                 now=engine_start,
             )
         except MissingRequiredColumnsError as exc:
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key=str(exc),
+            error_message = str(exc)
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="NORMALIZE",
+                error_code="missing_required_columns",
+                error_message=error_message,
                 artifacts=artifacts,
+                errors_key=None,
             )
-            raise NonRetryableError(str(exc)) from exc
+            raise NonRetryableError(error_message) from exc
         except ValueError as exc:
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key=str(exc),
+            error_message = str(exc)
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="NORMALIZE",
+                error_code="invalid_input",
+                error_message=error_message,
                 artifacts=artifacts,
+                errors_key=None,
             )
-            raise NonRetryableError(str(exc)) from exc
+            raise NonRetryableError(error_message) from exc
         stage_times["engine_seconds"] = (datetime.utcnow() - engine_start).total_seconds()
+        self._update_run_status(job.run_id, "RUNNING", stage="MERGE_PRICE")
 
         errors = engine_result.errors
         vendor_counts = engine_result.summary["vendor_record_counts"]
@@ -165,8 +259,9 @@ class Worker:
             if vendor_id not in vendor_inputs:
                 continue
             normalized_key = (
-                f"tenants/{config.tenant_id}/normalized/{vendor_id}/{job.run_id}/normalized.csv"
+                f"{run_prefix}/normalized/{vendor_id}/normalized.csv"
             )
+            self._ensure_run_prefix(run_id=job.run_id, key=normalized_key)
             normalized_bytes = write_csv_bytes(
                 normalized_rows,
                 CANONICAL_COLUMNS,
@@ -180,7 +275,8 @@ class Worker:
 
         error_key = None
         if errors:
-            error_key = f"tenants/{config.tenant_id}/reports/{job.run_id}/errors.json"
+            error_key = f"{reports_prefix}/errors.json"
+            self._ensure_run_prefix(run_id=job.run_id, key=error_key)
             try:
                 self.s3.upload_text(
                     error_key,
@@ -192,12 +288,14 @@ class Worker:
 
         invalid_rows = len(errors)
         if total_rows == 0:
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key=error_key or "no_rows_parsed",
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="MERGE_PRICE",
+                error_code="no_rows_parsed",
+                error_message="no rows parsed",
                 artifacts=artifacts,
+                errors_key=error_key,
             )
             log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
             raise NonRetryableError("no rows parsed")
@@ -205,12 +303,14 @@ class Worker:
         exceeds_row_count = invalid_rows > error_policy.max_invalid_rows
         exceeds_row_pct = (invalid_rows / total_rows) > error_policy.max_invalid_row_pct
         if invalid_rows and (exceeds_row_count or exceeds_row_pct):
-            self.runs.update_status(
-                job.run_id,
-                "FAILED",
-                completed_at=datetime.utcnow(),
-                error_report_key=error_key or "validation_errors",
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="MERGE_PRICE",
+                error_code="validation_errors",
+                error_message="validation errors",
                 artifacts=artifacts,
+                errors_key=error_key,
             )
             log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
             raise NonRetryableError("validation errors")
@@ -221,7 +321,9 @@ class Worker:
             )
 
         output_start = datetime.utcnow()
-        output_key = f"tenants/{config.tenant_id}/outputs/{job.run_id}/merged_inventory.csv"
+        self._update_run_status(job.run_id, "RUNNING", stage="WRITE_OUTPUTS")
+        output_key = f"{run_prefix}/outputs/merged_inventory.csv"
+        self._ensure_run_prefix(run_id=job.run_id, key=output_key)
         output_columns = config.output.columns or CANONICAL_COLUMNS
         output_bytes = write_csv_bytes(
             engine_result.merged_rows,
@@ -235,7 +337,8 @@ class Worker:
         artifacts["merged_inventory"] = output_key
         stage_times["output_seconds"] = (datetime.utcnow() - output_start).total_seconds()
 
-        summary_key = f"tenants/{config.tenant_id}/reports/{job.run_id}/run_summary.json"
+        summary_key = f"{reports_prefix}/run_summary.json"
+        self._ensure_run_prefix(run_id=job.run_id, key=summary_key)
         completed_at = datetime.utcnow()
         duration_seconds = (completed_at - start_time).total_seconds()
         summary_data = engine_result.summary
@@ -259,11 +362,19 @@ class Worker:
             raise RetryableError(str(exc)) from exc
         artifacts["run_summary"] = summary_key
 
-        self.runs.update_status(
+        self._update_run_status(
             job.run_id,
             "SUCCEEDED",
-            completed_at=datetime.utcnow(),
+            stage="COMPLETE",
+            finished_at=datetime.utcnow(),
             artifacts=artifacts,
+            clear_fields=[
+                "failed_stage",
+                "error_code",
+                "error_message",
+                "errors_artifact_key",
+                "error_report_key",
+            ],
         )
         log_event(self.logger, "run_succeeded", run_id=job.run_id, artifacts=artifacts)
 
@@ -287,11 +398,11 @@ class Worker:
                 except (BotoCoreError, ClientError) as delete_exc:
                     log_event(self.logger, "queue_delete_error", error=str(delete_exc))
                     continue
-                self.runs.update_status(
+                self._update_run_status(
                     job.run_id,
                     "FAILED",
-                    completed_at=datetime.utcnow(),
-                    error_report_key=str(exc),
+                    finished_at=datetime.utcnow(),
+                    error_message=str(exc),
                 )
                 log_event(self.logger, "run_failed", run_id=job.run_id, error=str(exc))
             except RetryableError as exc:
