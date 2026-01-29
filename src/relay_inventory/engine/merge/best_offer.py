@@ -37,10 +37,12 @@ def merge_best_offer(
         grouped.setdefault(record.sku, []).append(record)
 
     merged: List[InventoryRecord] = []
-    for sku, sku_records in grouped.items():
-        def sort_key(item: InventoryRecord) -> tuple[int, Decimal]:
+    for sku in sorted(grouped.keys()):
+        sku_records = grouped[sku]
+
+        def sort_key(item: InventoryRecord) -> tuple[int, Decimal, str]:
             in_stock = 1 if item.quantity_available > 0 else 0
-            return (-in_stock, _landed_cost(item, config.landed_cost))
+            return (-in_stock, _landed_cost(item, config.landed_cost), item.vendor_id)
 
         sorted_records = sorted(sku_records, key=sort_key)
         selected = sorted_records[0]

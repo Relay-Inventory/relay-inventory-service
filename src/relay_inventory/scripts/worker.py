@@ -163,10 +163,11 @@ class Worker:
 
         output_start = datetime.utcnow()
         output_key = f"tenants/{config.tenant_id}/outputs/{job.run_id}/merged_inventory.csv"
-        lines = [",".join(CANONICAL_COLUMNS) + "\n"]
+        output_columns = config.output.columns or CANONICAL_COLUMNS
+        lines = [",".join(output_columns) + "\n"]
         for record in priced:
             row = record.model_dump()
-            lines.append(",".join(str(row.get(col, "")) for col in CANONICAL_COLUMNS) + "\n")
+            lines.append(",".join(str(row.get(col, "")) for col in output_columns) + "\n")
         try:
             self.s3.upload_lines(output_key, lines)
         except (BotoCoreError, ClientError) as exc:
