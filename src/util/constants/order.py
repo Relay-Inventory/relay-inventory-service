@@ -1,6 +1,0 @@
-EXTENSION_ATTRIBUTES = "extension_attributes"
-CHANNEL_FEE = "channel_final_fee"
-WALMART_FEE = "walmart_channel_discount"
-ADDITIONAL_PAYMENT_INFO = "payment_additional_info"
-KEY = "key"
-VALUE = "value"
