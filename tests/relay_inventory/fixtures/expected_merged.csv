@@ -1,0 +1,3 @@
+sku,quantity_available,price,vendor_id,updated_at
+SKU-001,5,25,vendor_1,2020-01-01T00:00:00
+SKU-002,3,29.99,vendor_2,2020-01-01T00:00:00
