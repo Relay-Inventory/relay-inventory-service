@@ -66,7 +66,9 @@ def parse_csv(
     vendor_id: str,
     column_map: Dict[str, str],
     default_condition: Optional[str] = None,
+    now: Optional[datetime] = None,
 ) -> Tuple[List[InventoryRecord], List[ParseError]]:
+    parsed_at = now or datetime.utcnow()
     reader = csv.DictReader(handle)
     required_fields = ["sku", "quantity_available"]
     missing = []
@@ -110,7 +112,7 @@ def parse_csv(
                 or default_condition,
                 brand=row.get(column_map.get("brand", "brand")),
                 title=row.get(column_map.get("title", "title")),
-                updated_at=updated_at or datetime.utcnow(),
+                updated_at=updated_at or parsed_at,
             )
             records.append(record)
         except Exception as exc:  # noqa: BLE001 - capture parse errors for reporting
