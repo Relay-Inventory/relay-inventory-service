@@ -23,6 +23,7 @@ from relay_inventory.persistence.dynamo_runs import DynamoRuns
 from relay_inventory.persistence.dynamo_tenants import DynamoTenants
 from relay_inventory.util.errors import NonRetryableError, RetryableError
 from relay_inventory.util.logging import get_logger, log_event
+from relay_inventory.util.metrics import CloudWatchMetrics
 
 
 class Worker:
@@ -39,6 +40,7 @@ class Worker:
         self.tenants = DynamoTenants(tenants_table)
         self.queue = SqsAdapter(queue_url) if queue_url else None
         self.logger = get_logger(self.__class__.__name__)
+        self.metrics = CloudWatchMetrics.from_env()
 
     def _stage_index(self, stage: str) -> int:
         stages = ["FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
@@ -115,6 +117,7 @@ class Worker:
             error_report_key=errors_key,
             artifacts=artifacts,
         )
+        self.metrics.record_run_failure(tenant_id=job.tenant_id, failed=True)
 
     def run_job(self, job: RunJob) -> None:
         log_event(self.logger, "run_started", run_id=job.run_id, tenant_id=job.tenant_id)
@@ -400,7 +403,13 @@ class Worker:
                 artifacts=artifacts,
                 errors_key=error_key,
             )
-            log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
+            log_event(
+                self.logger,
+                "run_failed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                error_report_key=error_key,
+            )
             raise NonRetryableError("no rows parsed")
 
         exceeds_row_count = invalid_rows > error_policy.max_invalid_rows
@@ -415,7 +424,13 @@ class Worker:
                 artifacts=artifacts,
                 errors_key=error_key,
             )
-            log_event(self.logger, "run_failed", run_id=job.run_id, error_report_key=error_key)
+            log_event(
+                self.logger,
+                "run_failed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                error_report_key=error_key,
+            )
             raise NonRetryableError("validation errors")
 
         if invalid_rows:
@@ -479,7 +494,14 @@ class Worker:
                 "error_report_key",
             ],
         )
-        log_event(self.logger, "run_succeeded", run_id=job.run_id, artifacts=artifacts)
+        self.metrics.record_run_failure(tenant_id=job.tenant_id, failed=False)
+        log_event(
+            self.logger,
+            "run_succeeded",
+            run_id=job.run_id,
+            tenant_id=job.tenant_id,
+            artifacts=artifacts,
+        )
 
     def run_forever(self) -> None:
         if not self.queue:
@@ -488,6 +510,7 @@ class Worker:
             try:
                 message = self.queue.receive()
             except (BotoCoreError, ClientError) as exc:
+                self.metrics.record_worker_error(error_type="queue_receive_error")
                 log_event(self.logger, "queue_receive_error", error=str(exc))
                 continue
             if not message:
@@ -499,6 +522,7 @@ class Worker:
                 try:
                     self.queue.delete(message.receipt_handle)
                 except (BotoCoreError, ClientError) as delete_exc:
+                    self.metrics.record_worker_error(error_type="queue_delete_error")
                     log_event(self.logger, "queue_delete_error", error=str(delete_exc))
                     continue
                 self._update_run_status(
@@ -507,11 +531,25 @@ class Worker:
                     finished_at=datetime.utcnow(),
                     error_message=str(exc),
                 )
-                log_event(self.logger, "run_failed", run_id=job.run_id, error=str(exc))
+                log_event(
+                    self.logger,
+                    "run_failed",
+                    run_id=job.run_id,
+                    tenant_id=job.tenant_id,
+                    error=str(exc),
+                )
             except RetryableError as exc:
-                log_event(self.logger, "run_retryable_error", run_id=job.run_id, error=str(exc))
+                self.metrics.record_worker_error(error_type="run_retryable_error")
+                log_event(
+                    self.logger,
+                    "run_retryable_error",
+                    run_id=job.run_id,
+                    tenant_id=job.tenant_id,
+                    error=str(exc),
+                )
             else:
                 try:
                     self.queue.delete(message.receipt_handle)
                 except (BotoCoreError, ClientError) as delete_exc:
+                    self.metrics.record_worker_error(error_type="queue_delete_error")
                     log_event(self.logger, "queue_delete_error", error=str(delete_exc))
