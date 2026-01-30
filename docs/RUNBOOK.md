@@ -15,6 +15,46 @@ This runbook is for quickly diagnosing and resolving failed runs in production.
 
 ---
 
+## Operational alarms (CloudWatch)
+
+The worker emits CloudWatch custom metrics when `CLOUDWATCH_METRICS_ENABLED=true`.
+Alarms can be created via `scripts/setup_cloudwatch_alarms.py`.
+
+### Alarm: Consecutive failures (per tenant or global)
+
+**Trigger**: `RunFailed` metric is `1` for 3 consecutive evaluation periods
+(`--consecutive-failure-threshold`, configurable).
+
+**Response**:
+1. Identify affected tenant (alarm name includes tenant, or check recent failed runs).
+2. Inspect the latest run’s `error_code` and `errors.json`.
+3. Fix input/config issue, then rerun.
+4. If multiple tenants failing simultaneously, check shared infrastructure (S3
+   bucket permissions, DynamoDB, queue connectivity).
+
+### Alarm: Sustained SQS backlog
+
+**Trigger**: `ApproximateNumberOfMessagesVisible` exceeds threshold for >X minutes.
+
+**Response**:
+1. Check worker capacity and deployment health (CPU/memory, task/instance count).
+2. Review worker logs for `queue_receive_error` or `run_retryable_error`.
+3. Scale workers or temporarily pause run creation if backlog keeps growing.
+4. Validate that SQS permissions and visibility timeout are correct.
+
+### Alarm: Worker crash loop / elevated error rate
+
+**Trigger**: `WorkerError` count exceeds threshold within a period.
+
+**Response**:
+1. Inspect worker logs around the alarm window for exceptions.
+2. Verify recent deployments or config changes (rollback if needed).
+3. Confirm dependent services (S3, DynamoDB) are healthy and reachable.
+4. If errors are retryable, check for downstream throttling or timeouts and
+   adjust retries/backoff.
+
+---
+
 ## Top 5 failure modes and fixes
 
 ### 1) `missing_tenant_config`
@@ -102,4 +142,3 @@ uses a different header name.
 4. **Validate** by checking `reports/input_manifest.json` and
    `reports/config_snapshot.json` to confirm the intended inputs and config were
    used.
-
