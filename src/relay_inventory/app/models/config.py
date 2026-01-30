@@ -26,6 +26,7 @@ class SkuMapConfig(BaseModel):
 
 class VendorConfig(BaseModel):
     vendor_id: str
+    required: bool = True
     inbound: InboundConfig
     parser: ParserConfig
     sku_map: Optional[SkuMapConfig] = None
@@ -76,6 +77,7 @@ class ErrorPolicy(BaseModel):
         description="Maximum invalid row ratio (0.0-1.0).",
     )
     fail_on_missing_required_columns: bool = True
+    missing_required_vendor_policy: str = "fail"
 
 
 class TenantConfig(BaseModel):
