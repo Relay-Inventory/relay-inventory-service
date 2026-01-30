@@ -129,6 +129,7 @@ class Worker:
         config = TenantConfig.model_validate(tenant_record.config)
         artifacts: Dict[str, str] = {}
         warnings: List[str] = []
+        missing_vendor_errors: List[Dict[str, str]] = []
         start_time = datetime.utcnow()
         stage_times: Dict[str, float] = {}
         error_policy = config.error_policy
@@ -162,12 +163,16 @@ class Worker:
                 vendor_latest[vendor.vendor_id] = {
                     "status": "missing",
                     "s3_prefix": prefix,
+                    "required": vendor.required,
+                    "expected_prefix": prefix,
                     "reason": "no_objects_found",
                 }
                 continue
             vendor_latest[vendor.vendor_id] = {
                 "status": "found",
                 "s3_prefix": prefix,
+                "required": vendor.required,
+                "expected_prefix": prefix,
                 "s3_key": latest.key,
                 "etag": latest.etag,
                 "size": latest.size,
@@ -186,6 +191,66 @@ class Worker:
                     raise RetryableError(str(exc)) from exc
                 vendor_inputs[sku_map_input_key(vendor.vendor_id)] = sku_text.encode("utf-8")
         stage_times["ingest_seconds"] = (datetime.utcnow() - ingest_start).total_seconds()
+
+        missing_required = []
+        missing_optional = []
+        for vendor in config.vendors:
+            if vendor.vendor_id in vendor_inputs:
+                continue
+            vendor_missing = {
+                "vendor_id": vendor.vendor_id,
+                "expected_prefix": vendor.inbound.s3_prefix or "",
+                "required": vendor.required,
+            }
+            if vendor.required:
+                missing_required.append(vendor_missing)
+            else:
+                missing_optional.append(vendor_missing)
+
+        if missing_required and error_policy.missing_required_vendor_policy != "warn_only":
+            expected = ", ".join(
+                f"{vendor['vendor_id']} (expected prefix {vendor['expected_prefix']})" for vendor in missing_required
+            )
+            error_message = f"required vendor inbound missing: {expected}"
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage="FETCH_INPUTS",
+                error_code="REQUIRED_VENDOR_MISSING",
+                error_message=error_message,
+                artifacts=artifacts,
+                errors_key=None,
+            )
+            raise NonRetryableError(error_message)
+
+        for vendor in missing_optional:
+            missing_vendor_errors.append(
+                {
+                    "error_code": "OPTIONAL_VENDOR_MISSING",
+                    "error_message": (
+                        f"optional vendor inbound missing for {vendor['vendor_id']} "
+                        f"(expected prefix {vendor['expected_prefix']})"
+                    ),
+                    "vendor_id": vendor["vendor_id"],
+                    "expected_prefix": vendor["expected_prefix"],
+                }
+            )
+            warnings.append(f"optional_vendor_missing:{vendor['vendor_id']}")
+
+        if missing_required and error_policy.missing_required_vendor_policy == "warn_only":
+            for vendor in missing_required:
+                missing_vendor_errors.append(
+                    {
+                        "error_code": "REQUIRED_VENDOR_MISSING",
+                        "error_message": (
+                            f"required vendor inbound missing for {vendor['vendor_id']} "
+                            f"(expected prefix {vendor['expected_prefix']})"
+                        ),
+                        "vendor_id": vendor["vendor_id"],
+                        "expected_prefix": vendor["expected_prefix"],
+                    }
+                )
+                warnings.append(f"required_vendor_missing:{vendor['vendor_id']}")
 
         input_manifest_key = f"{reports_prefix}/input_manifest.json"
         self._ensure_run_prefix(run_id=job.run_id, key=input_manifest_key)
@@ -274,20 +339,23 @@ class Worker:
             artifacts[f"normalized_{vendor_id}"] = normalized_key
 
         error_key = None
+        error_entries = list(missing_vendor_errors)
         if errors:
+            error_entries.extend([error.__dict__ for error in errors])
+        if error_entries:
             error_key = f"{reports_prefix}/errors.json"
             self._ensure_run_prefix(run_id=job.run_id, key=error_key)
             try:
                 self.s3.upload_text(
                     error_key,
-                    json.dumps([error.__dict__ for error in errors], default=str),
+                    json.dumps(error_entries, default=str),
                 )
             except (BotoCoreError, ClientError) as exc:
                 raise RetryableError(str(exc)) from exc
             artifacts["errors"] = error_key
 
         invalid_rows = len(errors)
-        if total_rows == 0:
+        if total_rows == 0 and not missing_vendor_errors:
             self._fail_run(
                 job=job,
                 status="FAILED",

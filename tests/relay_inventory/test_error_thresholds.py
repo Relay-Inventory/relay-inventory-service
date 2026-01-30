@@ -57,7 +57,7 @@ def dynamodb_tables(aws_resources):
     return {"tenants": tenants_table.name, "runs": runs_table.name}
 
 
-def _base_config(error_policy: dict) -> dict:
+def _base_config(error_policy: dict, *, vendor_required: bool = True) -> dict:
     return {
         "schema_version": 1,
         "tenant_id": "tenant-a",
@@ -66,6 +66,7 @@ def _base_config(error_policy: dict) -> dict:
         "vendors": [
             {
                 "vendor_id": "vendor-a",
+                "required": vendor_required,
                 "inbound": {"type": "s3", "s3_prefix": "vendor-a/"},
                 "parser": {"format": "csv", "column_map": {}},
             }
@@ -205,3 +206,55 @@ def test_retry_keeps_stage_monotonic_and_artifact_prefix(s3_bucket, dynamodb_tab
     assert second.errors_artifact_key is None
     for key in (second.artifacts or {}).values():
         assert key.startswith("run-4/")
+
+
+def test_missing_required_vendor_fails_fast(s3_bucket, dynamodb_tables):
+    config = _base_config(
+        {"max_invalid_rows": 1, "max_invalid_row_pct": 0.5},
+        vendor_required=True,
+    )
+    _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-5")
+    worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
+
+    job = RunJob(run_id="run-5", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
+    with pytest.raises(NonRetryableError, match="required vendor inbound missing"):
+        worker.run_job(job)
+
+    runs = DynamoRuns(dynamodb_tables["runs"])
+    record = runs.get("run-5")
+    assert record is not None
+    assert record.status == "FAILED"
+    assert record.error_code == "REQUIRED_VENDOR_MISSING"
+    assert record.errors_artifact_key == "run-5/tenants/tenant-a/reports/errors.json"
+
+
+def test_missing_optional_vendor_warns_and_succeeds(s3_bucket, dynamodb_tables):
+    config = _base_config(
+        {"max_invalid_rows": 1, "max_invalid_row_pct": 0.5},
+        vendor_required=False,
+    )
+    _put_tenant_config(dynamodb_tables["tenants"], config)
+    _create_run_record(dynamodb_tables["runs"], "run-6")
+    worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
+
+    job = RunJob(run_id="run-6", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
+    worker.run_job(job)
+
+    runs = DynamoRuns(dynamodb_tables["runs"])
+    record = runs.get("run-6")
+    assert record is not None
+    assert record.status == "SUCCEEDED"
+
+    client = boto3.client("s3", region_name="us-east-1")
+    summary_obj = client.get_object(
+        Bucket=s3_bucket, Key="run-6/tenants/tenant-a/reports/run_summary.json"
+    )
+    summary = json.loads(summary_obj["Body"].read().decode("utf-8"))
+    assert "optional_vendor_missing:vendor-a" in summary["warnings"]
+
+    errors_obj = client.get_object(
+        Bucket=s3_bucket, Key="run-6/tenants/tenant-a/reports/errors.json"
+    )
+    errors = json.loads(errors_obj["Body"].read().decode("utf-8"))
+    assert errors[0]["error_code"] == "OPTIONAL_VENDOR_MISSING"

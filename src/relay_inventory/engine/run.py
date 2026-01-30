@@ -85,9 +85,10 @@ def run_inventory_sync(
     for vendor in tenant_config.vendors:
         raw_bytes = vendor_inputs.get(vendor.vendor_id)
         if raw_bytes is None:
-            errors.append(
-                ParseError(row_number=0, reason="missing inbound file", row_data={"vendor": vendor.vendor_id})
-            )
+            if vendor.required and tenant_config.error_policy.missing_required_vendor_policy != "warn_only":
+                errors.append(
+                    ParseError(row_number=0, reason="missing inbound file", row_data={"vendor": vendor.vendor_id})
+                )
             normalized_by_vendor[vendor.vendor_id] = []
             vendor_counts[vendor.vendor_id] = 0
             continue
