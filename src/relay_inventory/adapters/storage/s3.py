@@ -36,8 +36,11 @@ class S3Adapter:
         )
 
     def download_text(self, key: str) -> str:
+        return self.download_bytes(key).decode("utf-8")
+
+    def download_bytes(self, key: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read().decode("utf-8")
+        return response["Body"].read()
 
     def upload_text(self, key: str, body: str) -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body.encode("utf-8"))

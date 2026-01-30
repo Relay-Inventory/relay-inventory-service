@@ -17,6 +17,7 @@ def test_s3_adapter_round_trip() -> None:
     assert latest is not None
     assert latest.key == "inbound/file.txt"
     assert adapter.download_text("inbound/file.txt") == "hello"
+    assert adapter.download_bytes("inbound/file.txt") == b"hello"
 
 
 @mock_aws

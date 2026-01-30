@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from relay_inventory.app.jobs.schema import RunJob
 from relay_inventory.persistence.dynamo_tenants import TenantRecord
 from relay_inventory.scripts.worker import Worker
+from relay_inventory.util.errors import NonRetryableError
 
 
 class FakeRuns:
@@ -35,14 +38,19 @@ class FakeS3:
 
         return Location(f"{prefix}latest.csv")
 
-    def download_text(self, key: str) -> str:
-        return "sku,quantity_available,price\nSKU1,1,1.00\n"
+    def download_bytes(self, key: str) -> bytes:
+        return b"sku,quantity_available,price\nSKU1,1,1.00\n"
 
     def upload_bytes(self, key: str, body: bytes) -> None:
         self.uploaded_bytes[key] = body
 
     def upload_text(self, key: str, body: str) -> None:
         self.uploaded_text[key] = body
+
+
+class FakeS3BadEncoding(FakeS3):
+    def download_bytes(self, key: str) -> bytes:
+        return b"sku,quantity_available,price\nSKU\xe9,1,1.00\n"
 
 
 def test_worker_calls_engine(monkeypatch):
@@ -129,3 +137,46 @@ def test_worker_calls_engine(monkeypatch):
     assert "vendor-a" in call_args["vendor_inputs"]
     assert isinstance(call_args["vendor_inputs"]["vendor-a"], bytes)
     assert isinstance(call_args["now"], datetime)
+
+
+def test_worker_reports_decode_error() -> None:
+    config = {
+        "schema_version": 1,
+        "tenant_id": "tenant-a",
+        "timezone": "UTC",
+        "default_currency": "USD",
+        "vendors": [
+            {
+                "vendor_id": "vendor-a",
+                "inbound": {"type": "s3", "s3_prefix": "vendor-a/"},
+                "parser": {"format": "csv", "column_map": {}, "encoding": "utf-8"},
+            }
+        ],
+        "pricing": {
+            "base_margin_pct": 0.1,
+            "min_price": 1,
+            "shipping_handling_flat": 0,
+            "map_policy": {"enforce": True, "map_floor_behavior": "max(price, map_price)"},
+            "rounding": {"mode": "nearest", "increment": "0.01"},
+        },
+        "merge": {
+            "strategy": "best_offer",
+            "best_offer": {"sort_by": [], "landed_cost": {"include_shipping_handling": True}},
+        },
+        "output": {"format": "csv", "columns": ["sku", "quantity_available", "price"]},
+        "error_policy": {"max_invalid_rows": 0, "max_invalid_row_pct": 0.0},
+    }
+    worker = Worker(bucket="bucket", runs_table="runs", tenants_table="tenants")
+    worker.runs = FakeRuns()
+    worker.tenants = FakeTenants(config)
+    worker.s3 = FakeS3BadEncoding()
+
+    job = RunJob(run_id="run-1", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
+
+    with pytest.raises(NonRetryableError):
+        worker.run_job(job)
+
+    _, status, kwargs = worker.runs.updates[-1]
+    assert status == "FAILED"
+    assert kwargs["error_code"] == "DECODE_ERROR"
+    assert "vendor-a" in kwargs["error_message"]
