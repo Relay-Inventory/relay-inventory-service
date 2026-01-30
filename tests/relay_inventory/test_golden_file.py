@@ -4,6 +4,7 @@ from pathlib import Path
 from freezegun import freeze_time
 
 from relay_inventory.app.config.loader import load_tenant_config
+from relay_inventory.engine.canonical.io import read_csv_rows, write_csv_bytes
 from relay_inventory.engine.canonical.models import CANONICAL_COLUMNS
 from relay_inventory.engine.pipeline import merge_records, price_records, process_vendor
 
@@ -30,16 +31,9 @@ def test_golden_output_matches_expected() -> None:
         reader = csv.DictReader(handle)
         expected_rows = list(reader)
 
-    output_rows = [
-        {
-            "sku": row.get("sku"),
-            "quantity_available": str(row.get("quantity_available")),
-            "price": str(row.get("price")),
-            "vendor_id": row.get("vendor_id"),
-            "updated_at": row.get("updated_at").strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        for row in rows
-    ]
+    output_columns = ["sku", "quantity_available", "price", "vendor_id", "updated_at"]
+    output_bytes = write_csv_bytes(rows, output_columns, extrasaction="ignore")
+    output_rows = read_csv_rows(output_bytes)
 
     assert output_rows == expected_rows
     assert set(CANONICAL_COLUMNS).issuperset({"sku", "quantity_available", "price", "vendor_id"})
