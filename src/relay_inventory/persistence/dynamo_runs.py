@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 
 @dataclass
@@ -103,3 +104,13 @@ class DynamoRuns:
         if not item:
             return None
         return RunRecord(**item)
+
+    def find_running_by_tenant(self, tenant_id: str) -> Optional[RunRecord]:
+        response = self.table.scan(
+            FilterExpression=Attr("tenant_id").eq(tenant_id) & Attr("status").eq("RUNNING"),
+            Limit=1,
+        )
+        items = response.get("Items", [])
+        if not items:
+            return None
+        return RunRecord(**items[0])
