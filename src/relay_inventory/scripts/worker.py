@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Dict, List
 
+import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from relay_inventory.adapters.queue.sqs import SqsAdapter, SqsMessage
@@ -44,10 +45,55 @@ class Worker:
         self.queue = SqsAdapter(queue_url) if queue_url else None
         self.logger = get_logger(self.__class__.__name__)
         self.metrics = CloudWatchMetrics.from_env()
+        self.cloudwatch_enabled = os.getenv("CLOUDWATCH_METRICS_ENABLED", "false").lower() == "true"
+        self.cloudwatch_namespace = os.getenv("CLOUDWATCH_METRICS_NAMESPACE", "RelayInventory")
+        self.cloudwatch_environment = os.getenv("ENVIRONMENT", "unknown")
+        self.cloudwatch = boto3.client("cloudwatch") if self.cloudwatch_enabled else None
         self.visibility_timeout_seconds = int(os.getenv("WORKER_VISIBILITY_TIMEOUT_SECONDS", "300"))
         self.visibility_heartbeat_seconds = int(os.getenv("WORKER_VISIBILITY_HEARTBEAT_SECONDS", "60"))
         self.tenant_backoff_seconds = int(os.getenv("WORKER_TENANT_BACKOFF_SECONDS", "30"))
-        self.poison_max_receives = int(os.getenv("WORKER_POISON_MAX_RECEIVES", "5"))
+        self.poison_max_receives = int(os.getenv("WORKER_POISON_MAX_RECEIVES", "3"))
+
+    def emit_metric(self, name: str, value: float, unit: str, tenant_id: str) -> None:
+        if not self.cloudwatch_enabled or not self.cloudwatch:
+            return
+        try:
+            self.cloudwatch.put_metric_data(
+                Namespace=self.cloudwatch_namespace,
+                MetricData=[
+                    {
+                        "MetricName": name,
+                        "Value": value,
+                        "Unit": unit,
+                        "Dimensions": [
+                            {"Name": "TenantId", "Value": tenant_id},
+                            {"Name": "Environment", "Value": self.cloudwatch_environment},
+                        ],
+                    }
+                ],
+            )
+        except (BotoCoreError, ClientError) as exc:
+            log_event(self.logger, "cloudwatch_metric_failed", metric=name, error=str(exc))
+
+    def emit_run_metrics(
+        self,
+        *,
+        tenant_id: str,
+        succeeded: bool,
+        duration_seconds: float,
+        rows_processed: int,
+    ) -> None:
+        if succeeded:
+            self.emit_metric("RunSucceeded", 1, "Count", tenant_id)
+            self.emit_metric("RunFailed", 0, "Count", tenant_id)
+        else:
+            self.emit_metric("RunSucceeded", 0, "Count", tenant_id)
+            self.emit_metric("RunFailed", 1, "Count", tenant_id)
+        self.emit_metric("RunDurationSeconds", duration_seconds, "Seconds", tenant_id)
+        self.emit_metric("RowsProcessed", rows_processed, "Count", tenant_id)
+
+    def emit_worker_heartbeat(self) -> None:
+        self.emit_metric("WorkerHeartbeat", 1, "Count", "worker")
 
     def _stage_index(self, stage: str) -> int:
         stages = ["QUEUE", "FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
@@ -104,7 +150,12 @@ class Worker:
         error_message: str,
         artifacts: Dict[str, str],
         errors_key: str | None,
+        start_time: datetime | None,
+        rows_processed: int | None,
     ) -> None:
+        duration_seconds = (
+            (datetime.utcnow() - start_time).total_seconds() if start_time else 0.0
+        )
         if not errors_key:
             errors_key = self._write_error_report(
                 run_id=job.run_id,
@@ -124,7 +175,12 @@ class Worker:
             error_report_key=errors_key,
             artifacts=artifacts,
         )
-        self.metrics.record_run_failure(tenant_id=job.tenant_id, failed=True)
+        self.emit_run_metrics(
+            tenant_id=job.tenant_id,
+            succeeded=False,
+            duration_seconds=duration_seconds,
+            rows_processed=rows_processed or 0,
+        )
 
     def _find_active_tenant_run(self, *, tenant_id: str, exclude_run_id: str) -> str | None:
         if not hasattr(self.runs, "find_running_by_tenant"):
@@ -158,6 +214,7 @@ class Worker:
 
     def run_job(self, job: RunJob) -> None:
         log_event(self.logger, "run_started", run_id=job.run_id, tenant_id=job.tenant_id)
+        start_time = datetime.utcnow()
         self._update_run_status(
             job.run_id,
             "RUNNING",
@@ -174,13 +231,14 @@ class Worker:
                 error_message="missing tenant config",
                 artifacts={},
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError("missing tenant config")
         config = TenantConfig.model_validate(tenant_record.config)
         artifacts: Dict[str, str] = {}
         warnings: List[str] = []
         missing_vendor_errors: List[Dict[str, str]] = []
-        start_time = datetime.utcnow()
         stage_times: Dict[str, float] = {}
         error_policy = config.error_policy
         run_prefix = self._run_prefix(run_id=job.run_id, tenant_id=config.tenant_id)
@@ -283,6 +341,8 @@ class Worker:
                 error_message=error_message,
                 artifacts=artifacts,
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError(error_message)
 
@@ -340,6 +400,8 @@ class Worker:
                 error_message=error_message,
                 artifacts=artifacts,
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError(error_message)
 
@@ -362,6 +424,8 @@ class Worker:
                 error_message=error_message,
                 artifacts=artifacts,
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError(error_message) from exc
         except MissingRequiredColumnsError as exc:
@@ -374,6 +438,8 @@ class Worker:
                 error_message=error_message,
                 artifacts=artifacts,
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError(error_message) from exc
         except ValueError as exc:
@@ -386,6 +452,8 @@ class Worker:
                 error_message=error_message,
                 artifacts=artifacts,
                 errors_key=None,
+                start_time=start_time,
+                rows_processed=0,
             )
             raise NonRetryableError(error_message) from exc
         stage_times["engine_seconds"] = (datetime.utcnow() - engine_start).total_seconds()
@@ -439,6 +507,8 @@ class Worker:
                 error_message="no rows parsed",
                 artifacts=artifacts,
                 errors_key=error_key,
+                start_time=start_time,
+                rows_processed=total_rows,
             )
             log_event(
                 self.logger,
@@ -460,6 +530,8 @@ class Worker:
                 error_message="validation errors",
                 artifacts=artifacts,
                 errors_key=error_key,
+                start_time=start_time,
+                rows_processed=total_rows,
             )
             log_event(
                 self.logger,
@@ -531,7 +603,12 @@ class Worker:
                 "error_report_key",
             ],
         )
-        self.metrics.record_run_failure(tenant_id=job.tenant_id, failed=False)
+        self.emit_run_metrics(
+            tenant_id=job.tenant_id,
+            succeeded=True,
+            duration_seconds=duration_seconds,
+            rows_processed=total_rows,
+        )
         log_event(
             self.logger,
             "run_succeeded",
@@ -569,16 +646,17 @@ class Worker:
             )
             return
         if message.receive_count >= self.poison_max_receives:
-            self._update_run_status(
-                job.run_id,
-                "FAILED",
-                stage="QUEUE",
-                failed_stage="QUEUE",
-                finished_at=datetime.utcnow(),
+            stage = record.stage if record and getattr(record, "stage", None) else "QUEUE"
+            self._fail_run(
+                job=job,
+                status="FAILED",
+                stage=stage,
                 error_code="POISON_JOB",
-                error_message=(
-                    f"Job exceeded max receives ({message.receive_count}/{self.poison_max_receives})"
-                ),
+                error_message="Job moved to DLQ after repeated failures",
+                artifacts=record.artifacts if record and record.artifacts else {},
+                errors_key=getattr(record, "errors_artifact_key", None),
+                start_time=None,
+                rows_processed=0,
             )
             self.metrics.record_worker_error(error_type="poison_job")
             log_event(
@@ -664,10 +742,11 @@ class Worker:
     def run_forever(self) -> None:
         if not self.queue:
             raise RuntimeError("Queue URL not configured")
-        worker_concurrency = max(1, int(os.getenv("WORKER_CONCURRENCY", "1")))
+        worker_concurrency = max(1, int(os.getenv("WORKER_MAX_CONCURRENCY", "1")))
         with ThreadPoolExecutor(max_workers=worker_concurrency) as executor:
             futures = set()
             while True:
+                self.emit_worker_heartbeat()
                 completed = {future for future in futures if future.done()}
                 if completed:
                     for future in completed:

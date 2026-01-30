@@ -58,8 +58,8 @@ Alarms can be created via `scripts/setup_cloudwatch_alarms.py`.
 ## Dead-letter queue (DLQ) inspection
 
 Poison jobs (bad configs or consistently failing runs) are routed to the SQS DLQ
-after `WORKER_POISON_MAX_RECEIVES` receives. Ensure the queue redrive policy
-`maxReceiveCount` matches the worker threshold to keep behavior consistent.
+after 3 failed receives. Ensure the queue redrive policy `maxReceiveCount=3`
+matches the worker threshold to keep behavior consistent.
 
 **Inspect via AWS Console**:
 1. Open the SQS DLQ.

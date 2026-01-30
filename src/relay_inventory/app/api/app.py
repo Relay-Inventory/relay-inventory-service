@@ -8,6 +8,7 @@ from typing import Dict, Optional
 import logging
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 from botocore.exceptions import BotoCoreError, ClientError
 from relay_inventory.adapters.queue.sqs import SqsAdapter
@@ -133,9 +134,12 @@ async def create_run(request: RunRequest) -> RunStatus:
     run_id = str(uuid.uuid4())
     running = runs_repo.find_running_by_tenant(request.tenant_id) if hasattr(runs_repo, "find_running_by_tenant") else None
     if running:
-        raise HTTPException(
+        return JSONResponse(
             status_code=409,
-            detail=f"run already running for tenant {request.tenant_id} (run_id={running.run_id})",
+            content={
+                "error": "TENANT_ALREADY_RUNNING",
+                "active_run_id": running.run_id,
+            },
         )
     tenant_record = (
         tenants_repo.get_latest(request.tenant_id) if hasattr(tenants_repo, "get_latest") else None

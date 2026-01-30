@@ -17,9 +17,10 @@ class MetricDimension:
 
 
 class CloudWatchMetrics:
-    def __init__(self, *, namespace: str, enabled: bool) -> None:
+    def __init__(self, *, namespace: str, enabled: bool, environment: str) -> None:
         self.namespace = namespace
         self.enabled = enabled
+        self.environment = environment
         self.client = boto3.client("cloudwatch") if enabled else None
         self.logger = get_logger(self.__class__.__name__)
 
@@ -27,7 +28,8 @@ class CloudWatchMetrics:
     def from_env(cls) -> "CloudWatchMetrics":
         enabled = os.getenv("CLOUDWATCH_METRICS_ENABLED", "false").lower() == "true"
         namespace = os.getenv("CLOUDWATCH_METRICS_NAMESPACE", "RelayInventory")
-        return cls(namespace=namespace, enabled=enabled)
+        environment = os.getenv("ENVIRONMENT", "unknown")
+        return cls(namespace=namespace, enabled=enabled, environment=environment)
 
     def _put_metric(
         self,
@@ -61,13 +63,18 @@ class CloudWatchMetrics:
         self._put_metric(
             name="RunFailed",
             value=value,
-            dimensions=[MetricDimension(name="tenant_id", value=tenant_id)],
+            dimensions=[
+                MetricDimension(name="TenantId", value=tenant_id),
+                MetricDimension(name="Environment", value=self.environment),
+            ],
         )
-        self._put_metric(name="RunFailed", value=value)
 
     def record_worker_error(self, *, error_type: str) -> None:
         self._put_metric(
             name="WorkerError",
             value=1.0,
-            dimensions=[MetricDimension(name="error_type", value=error_type)],
+            dimensions=[
+                MetricDimension(name="error_type", value=error_type),
+                MetricDimension(name="Environment", value=self.environment),
+            ],
         )
