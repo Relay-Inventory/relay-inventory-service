@@ -63,6 +63,12 @@ class InMemoryRuns:
     def get(self, run_id: str) -> Optional[RunRecord]:
         return self._data.get(run_id)
 
+    def find_running_by_tenant(self, tenant_id: str) -> Optional[RunRecord]:
+        for record in self._data.values():
+            if record.tenant_id == tenant_id and record.status == "RUNNING":
+                return record
+        return None
+
 
 runs_table = os.getenv("RUNS_TABLE")
 tenants_table = os.getenv("TENANTS_TABLE")
@@ -122,6 +128,12 @@ async def update_tenant_config(tenant_id: str, config: TenantConfig) -> dict[str
 @app.post("/v1/runs", dependencies=[Depends(auth_dependency)])
 async def create_run(request: RunRequest) -> RunStatus:
     run_id = str(uuid.uuid4())
+    running = runs_repo.find_running_by_tenant(request.tenant_id) if hasattr(runs_repo, "find_running_by_tenant") else None
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"run already running for tenant {request.tenant_id} (run_id={running.run_id})",
+        )
     tenant_record = (
         tenants_repo.get_latest(request.tenant_id) if hasattr(tenants_repo, "get_latest") else None
     )

@@ -36,3 +36,10 @@ class SqsAdapter:
 
     def delete(self, receipt_handle: str) -> None:
         self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+    def change_visibility(self, receipt_handle: str, timeout_seconds: int) -> None:
+        self.client.change_message_visibility(
+            QueueUrl=self.queue_url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=timeout_seconds,
+        )

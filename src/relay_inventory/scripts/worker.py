@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import PurePosixPath
+import os
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Dict, List
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from relay_inventory.adapters.queue.sqs import SqsAdapter
+from relay_inventory.adapters.queue.sqs import SqsAdapter, SqsMessage
 from relay_inventory.adapters.storage.s3 import S3Adapter
 from relay_inventory.app.jobs.schema import RunJob
 from relay_inventory.app.models.config import TenantConfig
@@ -41,6 +44,9 @@ class Worker:
         self.queue = SqsAdapter(queue_url) if queue_url else None
         self.logger = get_logger(self.__class__.__name__)
         self.metrics = CloudWatchMetrics.from_env()
+        self.visibility_timeout_seconds = int(os.getenv("WORKER_VISIBILITY_TIMEOUT_SECONDS", "300"))
+        self.visibility_heartbeat_seconds = int(os.getenv("WORKER_VISIBILITY_HEARTBEAT_SECONDS", "60"))
+        self.tenant_backoff_seconds = int(os.getenv("WORKER_TENANT_BACKOFF_SECONDS", "30"))
 
     def _stage_index(self, stage: str) -> int:
         stages = ["FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
@@ -118,6 +124,36 @@ class Worker:
             artifacts=artifacts,
         )
         self.metrics.record_run_failure(tenant_id=job.tenant_id, failed=True)
+
+    def _find_active_tenant_run(self, *, tenant_id: str, exclude_run_id: str) -> str | None:
+        if not hasattr(self.runs, "find_running_by_tenant"):
+            return None
+        record = self.runs.find_running_by_tenant(tenant_id)
+        if record and record.run_id != exclude_run_id:
+            return record.run_id
+        return None
+
+    def _start_visibility_heartbeat(self, receipt_handle: str) -> tuple[threading.Event, threading.Thread] | None:
+        if not self.queue or self.visibility_timeout_seconds <= 0:
+            return None
+        try:
+            self.queue.change_visibility(receipt_handle, self.visibility_timeout_seconds)
+        except (BotoCoreError, ClientError) as exc:
+            log_event(self.logger, "queue_visibility_error", error=str(exc))
+        if self.visibility_heartbeat_seconds <= 0:
+            return None
+        stop_event = threading.Event()
+
+        def _heartbeat() -> None:
+            while not stop_event.wait(self.visibility_heartbeat_seconds):
+                try:
+                    self.queue.change_visibility(receipt_handle, self.visibility_timeout_seconds)
+                except (BotoCoreError, ClientError) as exc:
+                    log_event(self.logger, "queue_visibility_error", error=str(exc))
+
+        thread = threading.Thread(target=_heartbeat, daemon=True)
+        thread.start()
+        return stop_event, thread
 
     def run_job(self, job: RunJob) -> None:
         log_event(self.logger, "run_started", run_id=job.run_id, tenant_id=job.tenant_id)
@@ -503,53 +539,105 @@ class Worker:
             artifacts=artifacts,
         )
 
+    def _process_message(self, message: SqsMessage) -> None:
+        if not self.queue:
+            raise RuntimeError("Queue URL not configured")
+        job = RunJob.model_validate(message.body)
+        active_run_id = self._find_active_tenant_run(tenant_id=job.tenant_id, exclude_run_id=job.run_id)
+        if active_run_id:
+            log_event(
+                self.logger,
+                "tenant_run_in_progress",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                active_run_id=active_run_id,
+            )
+            try:
+                self.queue.change_visibility(message.receipt_handle, self.tenant_backoff_seconds)
+            except (BotoCoreError, ClientError) as exc:
+                self.metrics.record_worker_error(error_type="queue_visibility_error")
+                log_event(self.logger, "queue_visibility_error", error=str(exc))
+            return
+        record = self.runs.get(job.run_id) if hasattr(self.runs, "get") else None
+        if record and record.status in {"RUNNING", "SUCCEEDED", "FAILED"}:
+            log_event(
+                self.logger,
+                "run_already_processed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                status=record.status,
+            )
+            try:
+                self.queue.delete(message.receipt_handle)
+            except (BotoCoreError, ClientError) as delete_exc:
+                self.metrics.record_worker_error(error_type="queue_delete_error")
+                log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+            return
+        heartbeat = self._start_visibility_heartbeat(message.receipt_handle)
+        try:
+            self.run_job(job)
+        except NonRetryableError as exc:
+            try:
+                self.queue.delete(message.receipt_handle)
+            except (BotoCoreError, ClientError) as delete_exc:
+                self.metrics.record_worker_error(error_type="queue_delete_error")
+                log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+            self._update_run_status(
+                job.run_id,
+                "FAILED",
+                finished_at=datetime.utcnow(),
+                error_message=str(exc),
+            )
+            log_event(
+                self.logger,
+                "run_failed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                error=str(exc),
+            )
+        except RetryableError as exc:
+            self.metrics.record_worker_error(error_type="run_retryable_error")
+            log_event(
+                self.logger,
+                "run_retryable_error",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                error=str(exc),
+            )
+        finally:
+            if heartbeat:
+                stop_event, thread = heartbeat
+                stop_event.set()
+                thread.join(timeout=2)
+        else:
+            try:
+                self.queue.delete(message.receipt_handle)
+            except (BotoCoreError, ClientError) as delete_exc:
+                self.metrics.record_worker_error(error_type="queue_delete_error")
+                log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+
     def run_forever(self) -> None:
         if not self.queue:
             raise RuntimeError("Queue URL not configured")
-        while True:
-            try:
-                message = self.queue.receive()
-            except (BotoCoreError, ClientError) as exc:
-                self.metrics.record_worker_error(error_type="queue_receive_error")
-                log_event(self.logger, "queue_receive_error", error=str(exc))
-                continue
-            if not message:
-                continue
-            job = RunJob.model_validate(message.body)
-            try:
-                self.run_job(job)
-            except NonRetryableError as exc:
+        worker_concurrency = max(1, int(os.getenv("WORKER_CONCURRENCY", "1")))
+        with ThreadPoolExecutor(max_workers=worker_concurrency) as executor:
+            futures = set()
+            while True:
+                completed = {future for future in futures if future.done()}
+                if completed:
+                    for future in completed:
+                        future.result()
+                    futures -= completed
+                if len(futures) >= worker_concurrency:
+                    done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        future.result()
                 try:
-                    self.queue.delete(message.receipt_handle)
-                except (BotoCoreError, ClientError) as delete_exc:
-                    self.metrics.record_worker_error(error_type="queue_delete_error")
-                    log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+                    message = self.queue.receive()
+                except (BotoCoreError, ClientError) as exc:
+                    self.metrics.record_worker_error(error_type="queue_receive_error")
+                    log_event(self.logger, "queue_receive_error", error=str(exc))
                     continue
-                self._update_run_status(
-                    job.run_id,
-                    "FAILED",
-                    finished_at=datetime.utcnow(),
-                    error_message=str(exc),
-                )
-                log_event(
-                    self.logger,
-                    "run_failed",
-                    run_id=job.run_id,
-                    tenant_id=job.tenant_id,
-                    error=str(exc),
-                )
-            except RetryableError as exc:
-                self.metrics.record_worker_error(error_type="run_retryable_error")
-                log_event(
-                    self.logger,
-                    "run_retryable_error",
-                    run_id=job.run_id,
-                    tenant_id=job.tenant_id,
-                    error=str(exc),
-                )
-            else:
-                try:
-                    self.queue.delete(message.receipt_handle)
-                except (BotoCoreError, ClientError) as delete_exc:
-                    self.metrics.record_worker_error(error_type="queue_delete_error")
-                    log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+                if not message:
+                    continue
+                futures.add(executor.submit(self._process_message, message))
