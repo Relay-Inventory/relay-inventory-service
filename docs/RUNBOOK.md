@@ -55,6 +55,32 @@ Alarms can be created via `scripts/setup_cloudwatch_alarms.py`.
 
 ---
 
+## Dead-letter queue (DLQ) inspection
+
+Poison jobs (bad configs or consistently failing runs) are routed to the SQS DLQ
+after `WORKER_POISON_MAX_RECEIVES` receives. Ensure the queue redrive policy
+`maxReceiveCount` matches the worker threshold to keep behavior consistent.
+
+**Inspect via AWS Console**:
+1. Open the SQS DLQ.
+2. Use the **Receive messages** action to peek at messages.
+3. Extract the `run_id` and `tenant_id` from the JSON body.
+
+**Inspect via CLI**:
+```
+aws sqs receive-message \
+  --queue-url $SQS_DLQ_URL \
+  --max-number-of-messages 10 \
+  --attribute-names All \
+  --wait-time-seconds 5
+```
+
+After capturing the `run_id`, check `/v1/runs/{run_id}` to confirm the run is
+`FAILED` with `error_code=POISON_JOB`, then fix the underlying config/data issue
+and create a new run.
+
+---
+
 ## Top 5 failure modes and fixes
 
 ### 1) `missing_tenant_config`

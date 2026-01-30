@@ -47,9 +47,10 @@ class Worker:
         self.visibility_timeout_seconds = int(os.getenv("WORKER_VISIBILITY_TIMEOUT_SECONDS", "300"))
         self.visibility_heartbeat_seconds = int(os.getenv("WORKER_VISIBILITY_HEARTBEAT_SECONDS", "60"))
         self.tenant_backoff_seconds = int(os.getenv("WORKER_TENANT_BACKOFF_SECONDS", "30"))
+        self.poison_max_receives = int(os.getenv("WORKER_POISON_MAX_RECEIVES", "5"))
 
     def _stage_index(self, stage: str) -> int:
-        stages = ["FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
+        stages = ["QUEUE", "FETCH_INPUTS", "NORMALIZE", "MERGE_PRICE", "WRITE_OUTPUTS", "COMPLETE"]
         return stages.index(stage)
 
     def _coerce_stage(self, run_id: str, stage: str | None) -> str | None:
@@ -543,6 +544,51 @@ class Worker:
         if not self.queue:
             raise RuntimeError("Queue URL not configured")
         job = RunJob.model_validate(message.body)
+        record = self.runs.get(job.run_id) if hasattr(self.runs, "get") else None
+        if record and record.status in {"RUNNING", "SUCCEEDED"}:
+            log_event(
+                self.logger,
+                "run_already_processed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                status=record.status,
+            )
+            try:
+                self.queue.delete(message.receipt_handle)
+            except (BotoCoreError, ClientError) as delete_exc:
+                self.metrics.record_worker_error(error_type="queue_delete_error")
+                log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+            return
+        if record and record.status == "FAILED" and record.error_code == "POISON_JOB":
+            log_event(
+                self.logger,
+                "poison_job_already_failed",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                receive_count=message.receive_count,
+            )
+            return
+        if message.receive_count >= self.poison_max_receives:
+            self._update_run_status(
+                job.run_id,
+                "FAILED",
+                stage="QUEUE",
+                failed_stage="QUEUE",
+                finished_at=datetime.utcnow(),
+                error_code="POISON_JOB",
+                error_message=(
+                    f"Job exceeded max receives ({message.receive_count}/{self.poison_max_receives})"
+                ),
+            )
+            self.metrics.record_worker_error(error_type="poison_job")
+            log_event(
+                self.logger,
+                "poison_job_detected",
+                run_id=job.run_id,
+                tenant_id=job.tenant_id,
+                receive_count=message.receive_count,
+            )
+            return
         active_run_id = self._find_active_tenant_run(tenant_id=job.tenant_id, exclude_run_id=job.run_id)
         if active_run_id:
             log_event(
@@ -558,8 +604,7 @@ class Worker:
                 self.metrics.record_worker_error(error_type="queue_visibility_error")
                 log_event(self.logger, "queue_visibility_error", error=str(exc))
             return
-        record = self.runs.get(job.run_id) if hasattr(self.runs, "get") else None
-        if record and record.status in {"RUNNING", "SUCCEEDED", "FAILED"}:
+        if record and record.status == "FAILED":
             log_event(
                 self.logger,
                 "run_already_processed",
