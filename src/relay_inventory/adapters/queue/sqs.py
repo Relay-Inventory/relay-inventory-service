@@ -11,6 +11,7 @@ import boto3
 class SqsMessage:
     receipt_handle: str
     body: Dict[str, Any]
+    receive_count: int = 1
 
 
 class SqsAdapter:
@@ -24,6 +25,7 @@ class SqsAdapter:
     def receive(self) -> Optional[SqsMessage]:
         response = self.client.receive_message(
             QueueUrl=self.queue_url,
+            AttributeNames=["ApproximateReceiveCount"],
             MaxNumberOfMessages=1,
             WaitTimeSeconds=5,
         )
@@ -32,7 +34,13 @@ class SqsAdapter:
             return None
         message = messages[0]
         body = json.loads(message.get("Body", "{}"))
-        return SqsMessage(receipt_handle=message["ReceiptHandle"], body=body)
+        attributes = message.get("Attributes", {})
+        receive_count = int(attributes.get("ApproximateReceiveCount", "1"))
+        return SqsMessage(
+            receipt_handle=message["ReceiptHandle"],
+            body=body,
+            receive_count=receive_count,
+        )
 
     def delete(self, receipt_handle: str) -> None:
         self.client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
