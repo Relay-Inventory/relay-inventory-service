@@ -26,6 +26,18 @@ class FakeTenants:
         return TenantRecord(tenant_id=tenant_id, config_version=config_version, config=self.config)
 
 
+class VersionedTenants:
+    def __init__(self) -> None:
+        self._configs: dict[tuple[str, int], dict] = {}
+
+    def put(self, tenant_id: str, config_version: int, config: dict) -> None:
+        self._configs[(tenant_id, config_version)] = config
+
+    def get(self, tenant_id: str, config_version: int) -> TenantRecord:
+        config = self._configs[(tenant_id, config_version)]
+        return TenantRecord(tenant_id=tenant_id, config_version=config_version, config=config)
+
+
 class FakeS3:
     def __init__(self) -> None:
         self.uploaded_bytes = {}
@@ -180,3 +192,73 @@ def test_worker_reports_decode_error() -> None:
     assert status == "FAILED"
     assert kwargs["error_code"] == "DECODE_ERROR"
     assert "vendor-a" in kwargs["error_message"]
+
+
+def test_worker_uses_pinned_config_version(monkeypatch) -> None:
+    config_v1 = {
+        "schema_version": 1,
+        "tenant_id": "tenant-a",
+        "timezone": "UTC",
+        "default_currency": "USD",
+        "vendors": [
+            {
+                "vendor_id": "vendor-a",
+                "inbound": {"type": "s3", "s3_prefix": "vendor-a/"},
+                "parser": {"format": "csv", "column_map": {}},
+            }
+        ],
+        "pricing": {
+            "base_margin_pct": 0.1,
+            "min_price": 1,
+            "shipping_handling_flat": 0,
+            "map_policy": {"enforce": True, "map_floor_behavior": "max(price, map_price)"},
+            "rounding": {"mode": "nearest", "increment": "0.01"},
+        },
+        "merge": {
+            "strategy": "best_offer",
+            "best_offer": {"sort_by": [], "landed_cost": {"include_shipping_handling": True}},
+        },
+        "output": {"format": "csv", "columns": ["sku", "quantity_available", "price"]},
+        "error_policy": {"max_invalid_rows": 0, "max_invalid_row_pct": 0.0},
+    }
+    config_v2 = {**config_v1, "default_currency": "EUR"}
+    tenants = VersionedTenants()
+    tenants.put("tenant-a", 1, config_v1)
+    tenants.put("tenant-a", 2, config_v2)
+
+    worker = Worker(bucket="bucket", runs_table="runs", tenants_table="tenants")
+    worker.runs = FakeRuns()
+    worker.tenants = tenants
+    worker.s3 = FakeS3()
+
+    call_args = {}
+
+    def fake_run_inventory_sync(*, vendor_inputs, tenant_config, run_id, now):
+        from relay_inventory.engine.run import EngineResult
+
+        call_args["tenant_config"] = tenant_config
+        return EngineResult(
+            normalized_by_vendor={},
+            merged_rows=[],
+            errors=[],
+            summary={
+                "run_id": run_id,
+                "vendor_count": 0,
+                "vendor_record_counts": {},
+                "record_count": 0,
+                "invalid_rows": 0,
+                "total_rows": 0,
+            },
+        )
+
+    import relay_inventory.scripts.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "run_inventory_sync", fake_run_inventory_sync)
+
+    job = RunJob(run_id="run-1", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
+    worker.run_job(job)
+
+    assert call_args["tenant_config"].default_currency == "USD"
+    snapshot = next(iter(worker.s3.uploaded_text.values()))
+    assert '"config_version": 1' in snapshot
+    assert '"default_currency": "USD"' in snapshot

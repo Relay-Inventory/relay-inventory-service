@@ -22,19 +22,22 @@ from relay_inventory.persistence.dynamo_tenants import DynamoTenants, TenantReco
 
 class InMemoryTenants:
     def __init__(self) -> None:
-        self._data: Dict[str, TenantRecord] = {}
+        self._data: Dict[str, Dict[int, TenantRecord]] = {}
 
     def put(self, record: TenantRecord) -> None:
-        self._data[record.tenant_id] = record
+        versions = self._data.setdefault(record.tenant_id, {})
+        versions[record.config_version] = record
 
     def get(self, tenant_id: str, config_version: int) -> Optional[TenantRecord]:
-        record = self._data.get(tenant_id)
-        if record and record.config_version == config_version:
-            return record
-        return None
+        versions = self._data.get(tenant_id, {})
+        return versions.get(config_version)
 
     def get_latest(self, tenant_id: str) -> Optional[TenantRecord]:
-        return self._data.get(tenant_id)
+        versions = self._data.get(tenant_id, {})
+        if not versions:
+            return None
+        latest_version = max(versions.keys())
+        return versions[latest_version]
 
 
 class InMemoryRuns:
