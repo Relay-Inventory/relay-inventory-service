@@ -11,10 +11,24 @@ from relay_inventory.engine.parsing.csv_parser import ParseError, parse_csv
 from relay_inventory.engine.pipeline import merge_records, price_records
 
 SKU_MAP_SUFFIX = "::sku_map"
+SUPPORTED_ENCODINGS = {
+    "utf-8": "utf-8",
+    "utf8": "utf-8",
+    "latin-1": "latin-1",
+    "iso-8859-1": "latin-1",
+    "iso8859-1": "latin-1",
+}
 
 
 class MissingRequiredColumnsError(ValueError):
     """Raised when a vendor input is missing required columns."""
+
+
+class DecodeError(ValueError):
+    def __init__(self, vendor_id: str, encoding: str, message: str) -> None:
+        super().__init__(message)
+        self.vendor_id = vendor_id
+        self.encoding = encoding
 
 
 @dataclass
@@ -29,6 +43,25 @@ def sku_map_input_key(vendor_id: str) -> str:
     return f"{vendor_id}{SKU_MAP_SUFFIX}"
 
 
+def _normalize_encoding(encoding: str) -> str:
+    normalized = encoding.strip().lower().replace("_", "-")
+    return SUPPORTED_ENCODINGS.get(normalized, normalized)
+
+
+def _decode_bytes(*, raw_bytes: bytes, encoding: str, vendor_id: str) -> str:
+    normalized = _normalize_encoding(encoding)
+    if normalized not in set(SUPPORTED_ENCODINGS.values()):
+        raise DecodeError(
+            vendor_id,
+            encoding,
+            f"unsupported encoding '{encoding}' for vendor {vendor_id}",
+        )
+    try:
+        return raw_bytes.decode(normalized)
+    except UnicodeDecodeError as exc:
+        raise DecodeError(vendor_id, encoding, str(exc)) from exc
+
+
 def _parse_vendor_input(
     vendor: VendorConfig,
     *,
@@ -38,8 +71,10 @@ def _parse_vendor_input(
     vendor_inputs: dict[str, bytes],
 ) -> tuple[list[InventoryRecord], list[ParseError]]:
     try:
+        encoding = vendor.parser.encoding or "utf-8"
+        decoded_text = _decode_bytes(raw_bytes=raw_bytes, encoding=encoding, vendor_id=vendor.vendor_id)
         records, vendor_errors = parse_csv(
-            io.StringIO(raw_bytes.decode("utf-8")),
+            io.StringIO(decoded_text),
             vendor_id=vendor.vendor_id,
             column_map=vendor.parser.column_map,
             now=now,
@@ -63,7 +98,12 @@ def _parse_vendor_input(
                 )
             )
         else:
-            sku_map = load_sku_map_from_text(sku_map_bytes.decode("utf-8"))
+            decoded_map = _decode_bytes(
+                raw_bytes=sku_map_bytes,
+                encoding=encoding,
+                vendor_id=vendor.vendor_id,
+            )
+            sku_map = load_sku_map_from_text(decoded_map)
             records = list(sku_map.apply(records))
 
     return records, vendor_errors
