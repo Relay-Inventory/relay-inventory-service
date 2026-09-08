@@ -4,11 +4,18 @@ import io
 from dataclasses import dataclass
 from datetime import datetime
 
+import pandas as pd
+
 from inventory_aggregator.app.models.config import TenantConfig, VendorConfig
 from inventory_aggregator.engine.canonical.models import InventoryRecord
+from inventory_aggregator.engine.config.compiled import compile_tenant_config
+from inventory_aggregator.engine.diff import SnapshotDiff, diff_snapshots
+from inventory_aggregator.engine.normalize.adjustments import apply_vendor_adjustments
 from inventory_aggregator.engine.normalize.sku_map import load_sku_map_from_text
 from inventory_aggregator.engine.parsing.csv_parser import ParseError, parse_csv
 from inventory_aggregator.engine.pipeline import merge_records, price_records
+from inventory_aggregator.engine.rules.apply import filter_by_vendor_rules
+from inventory_aggregator.engine.safety import SafetyDecision, SafetyThresholds, evaluate_safety
 
 SKU_MAP_SUFFIX = "::sku_map"
 SUPPORTED_ENCODINGS = {
@@ -37,6 +44,8 @@ class EngineResult:
     merged_rows: list[dict]
     errors: list[ParseError]
     summary: dict
+    diff: SnapshotDiff | None = None
+    safety: SafetyDecision | None = None
 
 
 def sku_map_input_key(vendor_id: str) -> str:
@@ -115,7 +124,13 @@ def run_inventory_sync(
     tenant_config: TenantConfig,
     run_id: str,
     now: datetime,
+    previous_snapshot: pd.DataFrame | None = None,
+    safety_thresholds: SafetyThresholds | None = None,
 ) -> EngineResult:
+    # Compiled once per invocation (per process/Lambda invocation), not per vendor -- see
+    # IMPLEMENTATION_PLAN.md Sec 8.2.
+    compiled_config = compile_tenant_config(tenant_config)
+
     normalized_by_vendor: dict[str, list[dict]] = {}
     errors: list[ParseError] = []
     vendor_counts: dict[str, int] = {}
@@ -140,6 +155,10 @@ def run_inventory_sync(
             tenant_config=tenant_config,
             vendor_inputs=vendor_inputs,
         )
+        compiled_vendor = compiled_config.vendors[vendor.vendor_id]
+        records = apply_vendor_adjustments(records, vendor)
+        records = filter_by_vendor_rules(records, compiled_vendor)
+
         errors.extend(vendor_errors)
         all_records.extend(records)
         vendor_counts[vendor.vendor_id] = len(records)
@@ -147,8 +166,22 @@ def run_inventory_sync(
         normalized_by_vendor[vendor.vendor_id] = [record.model_dump() for record in records]
 
     merged = merge_records(all_records, tenant_config)
-    priced = price_records(merged, tenant_config)
-    merged_rows = [record.model_dump() for record in priced]
+    priced = price_records(all_records, merged, tenant_config)
+    merged_rows = priced.to_dict(orient="records")
+
+    diff = diff_snapshots(previous_snapshot, priced)
+    previous_total_qty = (
+        int(previous_snapshot["available_qty"].sum())
+        if previous_snapshot is not None and not previous_snapshot.empty
+        else 0
+    )
+    current_total_qty = int(priced["available_qty"].sum()) if not priced.empty else 0
+    safety = evaluate_safety(
+        diff,
+        safety_thresholds or SafetyThresholds(),
+        previous_total_qty=previous_total_qty,
+        current_total_qty=current_total_qty,
+    )
 
     summary = {
         "run_id": run_id,
@@ -164,4 +197,6 @@ def run_inventory_sync(
         merged_rows=merged_rows,
         errors=errors,
         summary=summary,
+        diff=diff,
+        safety=safety,
     )
