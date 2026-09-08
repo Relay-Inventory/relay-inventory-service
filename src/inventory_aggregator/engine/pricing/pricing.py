@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 
+import pandas as pd
+
 from inventory_aggregator.engine.canonical.models import InventoryRecord
 
 
@@ -56,3 +58,23 @@ def apply_pricing(records: Iterable[InventoryRecord], rules: PricingRules) -> li
         new_price = compute_price(record.cost, rules, record.map_price)
         priced.append(record.model_copy(update={"price": new_price}))
     return priced
+
+
+def apply_pricing_to_snapshot(
+    snapshot: pd.DataFrame,
+    records_by_key: dict,  # dict[tuple[str, str], InventoryRecord], keyed by (sku, vendor_id)
+    rules: PricingRules,
+) -> pd.DataFrame:
+    """Returns snapshot with a new 'price' column (Decimal), computed via compute_price using
+    the source vendor's own cost/map_price."""
+    prices = []
+    for _, row in snapshot.iterrows():
+        key = (row["sku"], row["source_vendor_id"])
+        record = records_by_key.get(key)
+        if record is None or record.cost is None:
+            prices.append(None)
+            continue
+        prices.append(compute_price(record.cost, rules, record.map_price))
+    result = snapshot.copy()
+    result["price"] = prices
+    return result
