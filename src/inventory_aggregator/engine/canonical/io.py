@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Sequence
 
+import pandas as pd
+
 DECIMAL_FIELDS = {"cost", "map_price", "price", "msrp"}
 DATETIME_FIELDS = {"updated_at"}
 
@@ -86,3 +88,23 @@ def read_csv_rows(bytes_blob: bytes) -> list[dict]:
     buffer = io.StringIO(bytes_blob.decode("utf-8"))
     reader = csv.DictReader(buffer)
     return list(reader)
+
+
+def write_parquet_bytes(df: pd.DataFrame) -> bytes:
+    """Snapshot/intermediate-state format per IMPLEMENTATION_PLAN.md Sec 6: Parquet, not CSV
+    or pickle (pickle breaks across Lambda runtime versions). Raw feed ingestion stays
+    whatever format the vendor sends -- this is only for internal state between pipeline
+    stages and persisted snapshots.
+
+    Decimal-valued object-dtype columns round-trip exactly through pyarrow's parquet writer
+    without needing an explicit schema (verified directly, not assumed -- pyarrow infers a
+    decimal type from the Python Decimal values present); None values in a Decimal column
+    round-trip as None too."""
+    buffer = io.BytesIO()
+    df.to_parquet(buffer, engine="pyarrow", index=False)
+    return buffer.getvalue()
+
+
+def read_parquet_bytes(bytes_blob: bytes) -> pd.DataFrame:
+    buffer = io.BytesIO(bytes_blob)
+    return pd.read_parquet(buffer, engine="pyarrow")
