@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
-from inventory_aggregator.app.models.config import TenantConfig, VendorConfig
+import pandas as pd
+
+from inventory_aggregator.app.models.config import TenantConfig
 from inventory_aggregator.engine.canonical.models import InventoryRecord
-from inventory_aggregator.engine.merge.best_offer import BestOfferConfig, LandedCostConfig, merge_best_offer
+from inventory_aggregator.engine.config.compiled import CompiledVendorConfig
+from inventory_aggregator.engine.merge.reconcile import reconcile
+from inventory_aggregator.engine.normalize.adjustments import apply_vendor_adjustments
 from inventory_aggregator.engine.normalize.sku_map import SkuMap, load_sku_map
 from inventory_aggregator.engine.parsing.csv_parser import ParseError, load_csv_records
-from inventory_aggregator.engine.pricing.pricing import MapPolicy, PricingRules, RoundingRule, apply_pricing
+from inventory_aggregator.engine.pricing.pricing import (
+    MapPolicy,
+    PricingRules,
+    RoundingRule,
+    apply_pricing_to_snapshot,
+)
+from inventory_aggregator.engine.rules.apply import filter_by_vendor_rules
 
 
 @dataclass
@@ -19,10 +29,11 @@ class VendorResult:
 
 
 def process_vendor(
-    vendor_config: VendorConfig,
+    compiled_vendor: CompiledVendorConfig,
     *,
     source_path: str,
 ) -> VendorResult:
+    vendor_config = compiled_vendor.config
     records, errors = load_csv_records(
         source_path,
         vendor_id=vendor_config.vendor_id,
@@ -35,25 +46,28 @@ def process_vendor(
     if sku_map:
         records = list(sku_map.apply(records))
 
+    records = apply_vendor_adjustments(records, vendor_config)
+    records = filter_by_vendor_rules(records, compiled_vendor)
+
     return VendorResult(vendor_id=vendor_config.vendor_id, records=records, errors=errors)
 
 
-def merge_records(records: Iterable[InventoryRecord], config: TenantConfig) -> List[InventoryRecord]:
+def merge_records(records: Iterable[InventoryRecord], config: TenantConfig) -> pd.DataFrame:
+    """Returns the reconciled snapshot: sku, available_qty (summed across vendors),
+    source_vendor_id/source_cost (cheapest in-stock vendor), vendor_count."""
     if config.merge.strategy != "best_offer" or not config.merge.best_offer:
         raise ValueError("Unsupported merge strategy")
-    best_offer = config.merge.best_offer
-    landed_cost = LandedCostConfig(
-        include_shipping_handling=best_offer.landed_cost.include_shipping_handling,
-        shipping_handling_flat=config.pricing.shipping_handling_flat,
-    )
-    merge_config = BestOfferConfig(
-        landed_cost=landed_cost,
-        fallback_lead_time_days=best_offer.fallback_lead_time_days,
-    )
-    return merge_best_offer(records, config=merge_config)
+    return reconcile(list(records), shipping_handling_flat=config.pricing.shipping_handling_flat)
 
 
-def price_records(records: Iterable[InventoryRecord], config: TenantConfig) -> List[InventoryRecord]:
+def price_records(
+    all_records: Iterable[InventoryRecord],
+    snapshot: pd.DataFrame,
+    config: TenantConfig,
+) -> pd.DataFrame:
+    """all_records is the pre-merge, per-vendor record list (used to look up the source
+    vendor's own cost/map_price by (sku, vendor_id)); snapshot is merge_records' output."""
+    records_by_key = {(r.sku, r.vendor_id): r for r in all_records}
     rules = PricingRules(
         base_margin_pct=config.pricing.base_margin_pct,
         min_price=config.pricing.min_price,
@@ -67,4 +81,4 @@ def price_records(records: Iterable[InventoryRecord], config: TenantConfig) -> L
             increment=config.pricing.rounding.increment,
         ),
     )
-    return apply_pricing(records, rules)
+    return apply_pricing_to_snapshot(snapshot, records_by_key, rules)
