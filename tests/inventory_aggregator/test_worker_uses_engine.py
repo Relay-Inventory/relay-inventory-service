@@ -47,6 +47,9 @@ class FakeS3:
         class Location:
             def __init__(self, key: str) -> None:
                 self.key = key
+                self.etag = None
+                self.size = None
+                self.last_modified = None
 
         return Location(f"{prefix}latest.csv")
 
@@ -243,11 +246,11 @@ def test_worker_uses_pinned_config_version(monkeypatch) -> None:
             errors=[],
             summary={
                 "run_id": run_id,
-                "vendor_count": 0,
-                "vendor_record_counts": {},
-                "record_count": 0,
+                "vendor_count": 1,
+                "vendor_record_counts": {"vendor-a": 1},
+                "record_count": 1,
                 "invalid_rows": 0,
-                "total_rows": 0,
+                "total_rows": 1,
             },
         )
 

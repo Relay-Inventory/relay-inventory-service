@@ -253,7 +253,7 @@ class Worker:
             "tenant_config": config.model_dump(),
         }
         try:
-            self.s3.upload_text(config_snapshot_key, json.dumps(config_snapshot))
+            self.s3.upload_text(config_snapshot_key, json.dumps(config_snapshot, default=str))
         except (BotoCoreError, ClientError) as exc:
             raise RetryableError(str(exc)) from exc
         artifacts["config_snapshot"] = config_snapshot_key
@@ -520,7 +520,11 @@ class Worker:
             raise NonRetryableError("no rows parsed")
 
         exceeds_row_count = invalid_rows > error_policy.max_invalid_rows
-        exceeds_row_pct = (invalid_rows / total_rows) > error_policy.max_invalid_row_pct
+        exceeds_row_pct = (
+            (invalid_rows / total_rows) > float(error_policy.max_invalid_row_pct)
+            if total_rows > 0
+            else False
+        )
         if invalid_rows and (exceeds_row_count or exceeds_row_pct):
             self._fail_run(
                 job=job,
@@ -727,17 +731,17 @@ class Worker:
                 tenant_id=job.tenant_id,
                 error=str(exc),
             )
-        finally:
-            if heartbeat:
-                stop_event, thread = heartbeat
-                stop_event.set()
-                thread.join(timeout=2)
         else:
             try:
                 self.queue.delete(message.receipt_handle)
             except (BotoCoreError, ClientError) as delete_exc:
                 self.metrics.record_worker_error(error_type="queue_delete_error")
                 log_event(self.logger, "queue_delete_error", error=str(delete_exc))
+        finally:
+            if heartbeat:
+                stop_event, thread = heartbeat
+                stop_event.set()
+                thread.join(timeout=2)
 
     def run_forever(self) -> None:
         if not self.queue:
