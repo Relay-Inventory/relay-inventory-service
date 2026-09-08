@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class InboundConfig(BaseModel):
@@ -23,6 +23,17 @@ class SkuMapConfig(BaseModel):
     s3_key: Optional[str] = None
     local_path: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "SkuMapConfig":
+        if bool(self.s3_key) == bool(self.local_path):
+            raise ValueError("exactly one of s3_key or local_path must be set")
+        return self
+
+
+class VendorRules(BaseModel):
+    inclusion_condition: Optional[str] = None
+    exclusion_condition: Optional[str] = None
+
 
 class VendorConfig(BaseModel):
     vendor_id: str
@@ -30,6 +41,27 @@ class VendorConfig(BaseModel):
     inbound: InboundConfig
     parser: ParserConfig
     sku_map: Optional[SkuMapConfig] = None
+    buffer_qty: int = 0
+    min_qty_threshold: int = 0
+    cost_adjustment: Decimal = Decimal("0")
+    margin_floor: Optional[Decimal] = None
+    rules: Optional[VendorRules] = None
+
+    @field_validator("buffer_qty", "min_qty_threshold")
+    @classmethod
+    def non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be >= 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_rules(self) -> "VendorConfig":
+        if self.rules is not None:
+            from inventory_aggregator.engine.rules import compile_vendor_rules
+            from inventory_aggregator.engine.canonical.models import CANONICAL_COLUMNS
+
+            compile_vendor_rules(self.rules, allowed_columns=set(CANONICAL_COLUMNS))
+        return self
 
 
 class MapPolicyConfig(BaseModel):
@@ -72,8 +104,8 @@ class OutputConfig(BaseModel):
 
 class ErrorPolicy(BaseModel):
     max_invalid_rows: int = 0
-    max_invalid_row_pct: float = Field(
-        default=0.0,
+    max_invalid_row_pct: Decimal = Field(
+        default=Decimal("0.0"),
         description="Maximum invalid row ratio (0.0-1.0).",
     )
     fail_on_missing_required_columns: bool = True
