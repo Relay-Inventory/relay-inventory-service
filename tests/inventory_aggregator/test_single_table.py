@@ -113,3 +113,29 @@ def test_query_scoped_by_shop_id_partition(table_name: str) -> None:
     shop_1_configs = st.query("shop-1", "CONFIG#")
     assert len(shop_1_configs) == 1
     assert shop_1_configs[0].config["marker"] == "shop-1-config"
+
+
+def test_get_item_returns_none_when_missing(table_name: str) -> None:
+    st = SingleTable(table_name)
+    assert st.get_config("shop-1", 1) is None
+    assert st.get_feed_state("shop-1", "vendor_1", "feed_1") is None
+    assert st.get_item("shop-1", "CONFIG#0000000001") is None
+
+
+def test_get_item_raises_on_unknown_sk_prefix(table_name: str) -> None:
+    st = SingleTable(table_name)
+    # Write directly via the underlying table, bypassing the typed put_* helpers, since no
+    # public API constructs an item with an unrecognized sk -- this exercises the defensive
+    # "unknown sk prefix" branch a malformed/legacy item would trip.
+    st.table.put_item(Item={"shop_id": "shop-1", "sk": "UNKNOWN#123", "junk": "data"})
+    with pytest.raises(ValueError, match="unknown sk prefix"):
+        st.get_item("shop-1", "UNKNOWN#123")
+
+
+def test_query_runs_returns_most_recent_first(table_name: str) -> None:
+    st = SingleTable(table_name)
+    st.put_run("shop-1", RunItem(shop_id="shop-1", sk=run_sk("2026-01-01T00:00:00Z"), run_id="run-1", status="SUCCEEDED"))
+    st.put_run("shop-1", RunItem(shop_id="shop-1", sk=run_sk("2026-01-02T00:00:00Z"), run_id="run-2", status="SUCCEEDED"))
+    runs = st.query_runs("shop-1")
+    assert [r.run_id for r in runs] == ["run-2", "run-1"]
+    assert st.query_runs("shop-1", limit=1)[0].run_id == "run-2"
