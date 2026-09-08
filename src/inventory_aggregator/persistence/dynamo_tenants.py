@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from pydantic import BaseModel
 
 
-@dataclass
-class TenantRecord:
+class TenantRecord(BaseModel):
     tenant_id: str
     config_version: int
     config: dict
@@ -19,7 +18,7 @@ class DynamoTenants:
         self.table = boto3.resource("dynamodb").Table(table_name)
 
     def put(self, record: TenantRecord) -> None:
-        self.table.put_item(Item=record.__dict__)
+        self.table.put_item(Item=record.model_dump())
 
     def get(self, tenant_id: str, config_version: int) -> Optional[TenantRecord]:
         response = self.table.get_item(
@@ -28,7 +27,7 @@ class DynamoTenants:
         item = response.get("Item")
         if not item:
             return None
-        return TenantRecord(**item)
+        return TenantRecord.model_validate(item)
 
     def get_latest(self, tenant_id: str) -> Optional[TenantRecord]:
         response = self.table.query(
@@ -39,4 +38,4 @@ class DynamoTenants:
         items = response.get("Items", [])
         if not items:
             return None
-        return TenantRecord(**items[0])
+        return TenantRecord.model_validate(items[0])

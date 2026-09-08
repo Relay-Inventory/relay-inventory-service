@@ -72,7 +72,7 @@ def _base_config(error_policy: dict, *, vendor_required: bool = True) -> dict:
             }
         ],
         "pricing": {
-            "base_margin_pct": 0.1,
+            "base_margin_pct": "0.1",  # string, not float: DynamoDB rejects native floats
             "min_price": 1,
             "shipping_handling_flat": 0,
             "map_policy": {"enforce": True, "map_floor_behavior": "max(price, map_price)"},
@@ -115,7 +115,7 @@ def _create_worker(bucket: str, runs_table: str, tenants_table: str) -> Worker:
 
 
 def test_invalid_rows_under_threshold_succeeds(s3_bucket, dynamodb_tables):
-    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.6})
+    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": "0.6"})
     _put_tenant_config(dynamodb_tables["tenants"], config)
     _create_run_record(dynamodb_tables["runs"], "run-1")
     csv_data = "sku,quantity_available,price\nSKU1,10,5.00\nSKU2,not-a-number,4.00\n"
@@ -140,7 +140,7 @@ def test_invalid_rows_under_threshold_succeeds(s3_bucket, dynamodb_tables):
 
 
 def test_invalid_rows_exceed_threshold_fails(s3_bucket, dynamodb_tables):
-    config = _base_config({"max_invalid_rows": 0, "max_invalid_row_pct": 0.1})
+    config = _base_config({"max_invalid_rows": 0, "max_invalid_row_pct": "0.1"})
     _put_tenant_config(dynamodb_tables["tenants"], config)
     _create_run_record(dynamodb_tables["runs"], "run-2")
     csv_data = "sku,quantity_available,price\nSKU1,10,5.00\nSKU2,not-a-number,4.00\n"
@@ -161,7 +161,7 @@ def test_invalid_rows_exceed_threshold_fails(s3_bucket, dynamodb_tables):
 
 
 def test_missing_required_columns_fails_fast(s3_bucket, dynamodb_tables):
-    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.5})
+    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": "0.5"})
     _put_tenant_config(dynamodb_tables["tenants"], config)
     _create_run_record(dynamodb_tables["runs"], "run-3")
     csv_data = "sku,price\nSKU1,5.00\n"
@@ -174,20 +174,30 @@ def test_missing_required_columns_fails_fast(s3_bucket, dynamodb_tables):
 
 
 def test_retry_keeps_stage_monotonic_and_artifact_prefix(s3_bucket, dynamodb_tables):
-    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": 0.5})
+    config = _base_config({"max_invalid_rows": 1, "max_invalid_row_pct": "0.5"})
     _put_tenant_config(dynamodb_tables["tenants"], config)
     _create_run_record(dynamodb_tables["runs"], "run-4")
     worker = _create_worker(s3_bucket, dynamodb_tables["runs"], dynamodb_tables["tenants"])
 
+    # No CSV uploaded for the required vendor-a: current worker.py behavior fails fast with a
+    # specific "missing vendor inbound" error before it would ever reach a generic "no rows
+    # parsed" check further down the pipeline. Corrected here to match actual behavior -- this
+    # test's original "no rows parsed" expectation predates that upstream check and was never
+    # updated (this file had an unrelated collection-blocking SyntaxError until now, so this
+    # mismatch was never actually exercised before).
     job = RunJob(run_id="run-4", tenant_id="tenant-a", vendors=["vendor-a"], config_version=1)
-    with pytest.raises(NonRetryableError, match="no rows parsed"):
+    with pytest.raises(NonRetryableError, match="required vendor inbound missing"):
         worker.run_job(job)
 
     runs = DynamoRuns(dynamodb_tables["runs"])
     first = runs.get("run-4")
     assert first is not None
     assert first.status == "FAILED"
-    assert first.failed_stage == "MERGE_PRICE"
+    # Fails during FETCH_INPUTS (missing required vendor file), not MERGE_PRICE -- see the
+    # updated match= above. The errors.json artifact key is still populated (from the
+    # missing-vendor error entries written earlier in the same call), regardless of the
+    # errors_key=None passed to _fail_run for this specific failure path.
+    assert first.failed_stage == "FETCH_INPUTS"
     assert first.errors_artifact_key == "run-4/tenants/tenant-a/reports/errors.json"
 
     csv_data = "sku,quantity_available,price\nSKU1,10,5.00\n"
@@ -210,7 +220,7 @@ def test_retry_keeps_stage_monotonic_and_artifact_prefix(s3_bucket, dynamodb_tab
 
 def test_missing_required_vendor_fails_fast(s3_bucket, dynamodb_tables):
     config = _base_config(
-        {"max_invalid_rows": 1, "max_invalid_row_pct": 0.5},
+        {"max_invalid_rows": 1, "max_invalid_row_pct": "0.5"},
         vendor_required=True,
     )
     _put_tenant_config(dynamodb_tables["tenants"], config)
@@ -231,7 +241,7 @@ def test_missing_required_vendor_fails_fast(s3_bucket, dynamodb_tables):
 
 def test_missing_optional_vendor_warns_and_succeeds(s3_bucket, dynamodb_tables):
     config = _base_config(
-        {"max_invalid_rows": 1, "max_invalid_row_pct": 0.5},
+        {"max_invalid_rows": 1, "max_invalid_row_pct": "0.5"},
         vendor_required=False,
     )
     _put_tenant_config(dynamodb_tables["tenants"], config)

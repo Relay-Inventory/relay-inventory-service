@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 import boto3
 from boto3.dynamodb.conditions import Attr
+from pydantic import BaseModel
 
 
-@dataclass
-class RunRecord:
+class RunRecord(BaseModel):
     run_id: str
     tenant_id: str
     config_version: int
@@ -32,7 +31,7 @@ class DynamoRuns:
         self.table = boto3.resource("dynamodb").Table(table_name)
 
     def create(self, record: RunRecord) -> None:
-        self.table.put_item(Item=record.__dict__)
+        self.table.put_item(Item=record.model_dump())
 
     def update_status(
         self,
@@ -103,7 +102,7 @@ class DynamoRuns:
         item = response.get("Item")
         if not item:
             return None
-        return RunRecord(**item)
+        return RunRecord.model_validate(item)
 
     def find_running_by_tenant(self, tenant_id: str) -> Optional[RunRecord]:
         response = self.table.scan(
@@ -113,4 +112,4 @@ class DynamoRuns:
         items = response.get("Items", [])
         if not items:
             return None
-        return RunRecord(**items[0])
+        return RunRecord.model_validate(items[0])
