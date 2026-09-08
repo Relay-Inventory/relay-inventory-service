@@ -12,3 +12,5 @@ inventoryChecker.py
 .vscode/
 .claude/
 
+.coverage
+htmlcov/
