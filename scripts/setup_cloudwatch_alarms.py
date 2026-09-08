@@ -25,11 +25,11 @@ def _alarm_actions(topic_arn: Optional[str]) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create CloudWatch alarms for Relay Inventory")
-    parser.add_argument("--alarm-prefix", default="relay-inventory", help="Alarm name prefix")
+    parser = argparse.ArgumentParser(description="Create CloudWatch alarms for Inventory Aggregator")
+    parser.add_argument("--alarm-prefix", default="inventory-aggregator", help="Alarm name prefix")
     parser.add_argument(
         "--namespace",
-        default="RelayInventory",
+        default="InventoryAggregator",
         help="CloudWatch namespace for custom metrics",
     )
     parser.add_argument("--sns-topic-arn", help="SNS topic ARN for alarm actions")

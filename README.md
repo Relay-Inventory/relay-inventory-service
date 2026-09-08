@@ -1,21 +1,21 @@
-# Relay Inventory Service
+# Inventory Aggregator Service
 
-Relay Inventory consolidates multi-vendor inventory feeds into a single, normalized
+Inventory Aggregator consolidates multi-vendor inventory feeds into a single, normalized
 output feed with deterministic merge and pricing rules.
 
 ## Repository layout
 
 ```
-data/relay_inventory/         # Sample tenant config + CSV fixtures for local runs
+data/inventory_aggregator/         # Sample tenant config + CSV fixtures for local runs
 docs/                         # Product plan and onboarding notes
 scripts/local_run.py          # Local runner for CSV-based testing
-src/relay_inventory/          # Core service (API, engine, adapters, persistence)
-tests/relay_inventory/        # Unit + integration tests for the service
+src/inventory_aggregator/          # Core service (API, engine, adapters, persistence)
+tests/inventory_aggregator/        # Unit + integration tests for the service
 ```
 
 ## Local runner
 
-Run the pipeline against sample data in `data/relay_inventory`:
+Run the pipeline against sample data in `data/inventory_aggregator`:
 
 ```
 python scripts/local_run.py --tenant test_tenant --output-dir outputs
@@ -35,14 +35,14 @@ The runner writes normalized vendor CSVs and a merged inventory CSV under `outpu
 
 ## API service
 
-The FastAPI app lives in `src/relay_inventory/app/api/app.py`. Configure environment
+The FastAPI app lives in `src/inventory_aggregator/app/api/app.py`. Configure environment
 variables like `RUNS_TABLE`, `TENANTS_TABLE`, `SQS_QUEUE_URL`, and `ARTIFACT_BUCKET`
 to connect to AWS resources.
 
 ## Tests
 
-Run the Relay Inventory test suite:
+Run the Inventory Aggregator test suite:
 
 ```
-pytest tests/relay_inventory
+pytest tests/inventory_aggregator
 ```

@@ -5,9 +5,9 @@ import argparse
 import csv
 from pathlib import Path
 
-from relay_inventory.app.config.loader import load_tenant_config
-from relay_inventory.engine.canonical.models import CANONICAL_COLUMNS
-from relay_inventory.engine.pipeline import merge_records, price_records, process_vendor
+from inventory_aggregator.app.config.loader import load_tenant_config
+from inventory_aggregator.engine.canonical.models import CANONICAL_COLUMNS
+from inventory_aggregator.engine.pipeline import merge_records, price_records, process_vendor
 
 
 def parse_vendor_files(values: list[str]) -> dict[str, str]:
@@ -44,15 +44,15 @@ def main() -> None:
     if not args.config and not args.tenant:
         raise ValueError("Provide --config or --tenant")
     if args.tenant and not args.config:
-        config_path = Path("data/relay_inventory/tenant_config.yaml")
+        config_path = Path("data/inventory_aggregator/tenant_config.yaml")
     else:
         config_path = Path(args.config)
     config = load_tenant_config(config_path)
     vendor_files = parse_vendor_files(args.vendor_file)
     if args.tenant and not vendor_files:
         vendor_files = {
-            "vendor_1": "data/relay_inventory/vendor_1.csv",
-            "vendor_2": "data/relay_inventory/vendor_2.csv",
+            "vendor_1": "data/inventory_aggregator/vendor_1.csv",
+            "vendor_2": "data/inventory_aggregator/vendor_2.csv",
         }
 
     vendor_results = []

@@ -1,10 +1,10 @@
-# Relay Inventory Handoff Guide
+# Inventory Aggregator Handoff Guide
 
-This document is a full handoff guide for operating Relay Inventory without tribal knowledge. It covers the system architecture, workflows, operational limits, and how to respond to failures.
+This document is a full handoff guide for operating Inventory Aggregator without tribal knowledge. It covers the system architecture, workflows, operational limits, and how to respond to failures.
 
 ## 1) System overview
 
-Relay Inventory ingests vendor CSV feeds, normalizes them into a canonical schema, merges them with pricing rules, and produces a single merged inventory feed per tenant.
+Inventory Aggregator ingests vendor CSV feeds, normalizes them into a canonical schema, merges them with pricing rules, and produces a single merged inventory feed per tenant.
 
 **High-level flow**
 
@@ -29,7 +29,7 @@ Vendor CSVs (S3) --> API (create run) --> SQS job queue --> Worker --> Engine
 
 ### Worker
 
-- **Queue consumer**: SQS `relay-inventory-jobs`.
+- **Queue consumer**: SQS `inventory-aggregator-jobs`.
 - **Concurrency**: `WORKER_MAX_CONCURRENCY` (default 1).
 - **Poison jobs**: marked `FAILED` with `error_code=POISON_JOB` when receive count >= 3.
 - **Metrics**: emits CloudWatch metrics for run success/failure, duration, rows processed, and heartbeat.
@@ -67,8 +67,8 @@ tenants/<tenant_id>/inbound/<vendor_id>/
 
 ### SQS queues
 
-- **Main queue**: `relay-inventory-jobs`
-- **DLQ**: `relay-inventory-jobs-dlq`
+- **Main queue**: `inventory-aggregator-jobs`
+- **DLQ**: `inventory-aggregator-jobs-dlq`
 - **Redrive policy**: `maxReceiveCount = 3`
 
 ## 3) Happy path (step-by-step)
@@ -166,7 +166,7 @@ QUEUED -> RUNNING -> SUCCEEDED
 
 ## 7) DLQ procedure
 
-1. **Inspect the DLQ** (`relay-inventory-jobs-dlq`) in the AWS console.
+1. **Inspect the DLQ** (`inventory-aggregator-jobs-dlq`) in the AWS console.
 2. **Pull a message** and extract `run_id` + `tenant_id`.
 3. **Check the run status** via `GET /v1/runs/{run_id}`; it should show `error_code=POISON_JOB`.
 4. **Decide**:

@@ -1,6 +1,6 @@
-# Relay Inventory Infrastructure Notes
+# Inventory Aggregator Infrastructure Notes
 
-This document captures required production infrastructure settings, CloudWatch alarms, and queue policies for Relay Inventory.
+This document captures required production infrastructure settings, CloudWatch alarms, and queue policies for Inventory Aggregator.
 
 ## Environment variables
 
@@ -11,14 +11,14 @@ This document captures required production infrastructure settings, CloudWatch a
 | `TENANTS_TABLE` | DynamoDB table for tenant configs. | none |
 | `SQS_QUEUE_URL` | Main worker queue URL. | none |
 | `CLOUDWATCH_METRICS_ENABLED` | Enable CloudWatch metric emission (`true`/`false`). | `false` |
-| `CLOUDWATCH_METRICS_NAMESPACE` | Metric namespace for custom metrics. | `RelayInventory` |
+| `CLOUDWATCH_METRICS_NAMESPACE` | Metric namespace for custom metrics. | `InventoryAggregator` |
 | `ENVIRONMENT` | Environment dimension for metrics (ex: `prod`, `staging`). | `unknown` |
 | `WORKER_MAX_CONCURRENCY` | Maximum concurrent jobs per worker process. | `1` |
 | `WORKER_POISON_MAX_RECEIVES` | Receive threshold before marking a run as poison. | `3` |
 
 ## CloudWatch metrics (custom)
 
-The worker emits custom metrics to the `RelayInventory` namespace using `PutMetricData`.
+The worker emits custom metrics to the `InventoryAggregator` namespace using `PutMetricData`.
 
 **Emitted metrics** (dimensions: `TenantId`, `Environment`):
 
@@ -46,7 +46,7 @@ Create the following alarms in CloudWatch (no dashboard required). Adjust SNS/em
 ### Alarm 2 — Queue backlog
 
 - **Metric**: SQS `ApproximateNumberOfMessagesVisible`
-- **Queue**: `relay-inventory-jobs`
+- **Queue**: `inventory-aggregator-jobs`
 - **Threshold**: `> 5` for **10 minutes**
 - **Action**: Email/SNS notification
 
@@ -65,10 +65,10 @@ Create the following alarms in CloudWatch (no dashboard required). Adjust SNS/em
 
 ## SQS queues and redrive policy
 
-Relay Inventory uses a primary queue and a dead-letter queue (DLQ).
+Inventory Aggregator uses a primary queue and a dead-letter queue (DLQ).
 
-- **Main queue**: `relay-inventory-jobs`
-- **DLQ**: `relay-inventory-jobs-dlq`
+- **Main queue**: `inventory-aggregator-jobs`
+- **DLQ**: `inventory-aggregator-jobs-dlq`
 - **Redrive policy**: `maxReceiveCount = 3`
 
 When a message hits the receive threshold, the worker marks the run as `FAILED` with `error_code=POISON_JOB` and the message is moved to the DLQ automatically by SQS.
