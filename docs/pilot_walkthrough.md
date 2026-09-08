@@ -1,11 +1,11 @@
-# Relay Inventory Pilot Walkthrough
+# Inventory Aggregator Pilot Walkthrough
 
 ## 1. Create a tenant config
 
 Start from the sample config:
 
 ```
-cp data/relay_inventory/tenant_config.yaml tenant_config.yaml
+cp data/inventory_aggregator/tenant_config.yaml tenant_config.yaml
 ```
 
 Update `tenant_id`, vendor prefixes, and column maps as needed.

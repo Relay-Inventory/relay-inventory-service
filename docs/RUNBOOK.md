@@ -1,4 +1,4 @@
-# Relay Inventory Runbook
+# Inventory Aggregator Runbook
 
 This runbook is for quickly diagnosing and resolving failed runs in production.
 

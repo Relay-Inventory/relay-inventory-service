@@ -17,7 +17,6 @@ boto3 = "*"
 retry = "*"
 dynamodb-json = "*"
 botocore = "*"
-dacite = "*"
 dependency-injector = "*"
 asyncio = "*"
 flask = { extras = ["async"], version = "*" }

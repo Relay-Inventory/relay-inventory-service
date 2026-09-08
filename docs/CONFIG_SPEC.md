@@ -1,4 +1,4 @@
-# Relay Inventory Config Specification
+# Inventory Aggregator Config Specification
 
 This document describes the tenant configuration schema used by the API and worker.
 All fields map directly to `TenantConfig` and related models in the codebase, so the

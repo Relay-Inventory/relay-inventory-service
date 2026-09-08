@@ -12,7 +12,7 @@ versions). All config fields are documented in `docs/CONFIG_SPEC.md`.
 **Create tenant**
 
 ```bash
-curl -X POST "$RELAY_API/v1/tenants" \
+curl -X POST "$INVENTORY_AGGREGATOR_API/v1/tenants" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d @tenant_config.json
@@ -21,7 +21,7 @@ curl -X POST "$RELAY_API/v1/tenants" \
 **Update tenant config (new version)**
 
 ```bash
-curl -X PUT "$RELAY_API/v1/tenants/{tenant_id}/config" \
+curl -X PUT "$INVENTORY_AGGREGATOR_API/v1/tenants/{tenant_id}/config" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d @tenant_config.json
@@ -98,7 +98,7 @@ Repeat for each vendor prefix in the config.
 ## 3) Trigger a run
 
 ```bash
-curl -X POST "$RELAY_API/v1/runs" \
+curl -X POST "$INVENTORY_AGGREGATOR_API/v1/runs" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
@@ -113,7 +113,7 @@ Response includes a `run_id` and `config_version`.
 ## 4) Check run status
 
 ```bash
-curl -X GET "$RELAY_API/v1/runs/{run_id}" \
+curl -X GET "$INVENTORY_AGGREGATOR_API/v1/runs/{run_id}" \
   -H "X-API-Key: $API_KEY"
 ```
 
@@ -124,7 +124,7 @@ Look at `status`, `stage`, and any `error_code` for failures.
 Fetch presigned artifact URLs:
 
 ```bash
-curl -X GET "$RELAY_API/v1/runs/{run_id}/artifacts" \
+curl -X GET "$INVENTORY_AGGREGATOR_API/v1/runs/{run_id}/artifacts" \
   -H "X-API-Key: $API_KEY"
 ```
 
