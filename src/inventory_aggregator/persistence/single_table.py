@@ -38,6 +38,11 @@ class FeedStateItem(BaseModel):
     last_normalized_hash: Optional[str] = None
     last_fetch_status: Optional[str] = None
     last_fetched_at: Optional[str] = None
+    last_part_key: Optional[str] = None
+    """S3 key of the most recent normalized Parquet part actually written for this feed --
+    kept even across runs where the feed is unchanged (and therefore no new part is written),
+    so a later merge stage can reuse this vendor's last-known-good part instead of silently
+    dropping it from the snapshot when its hash hasn't changed."""
 
 
 class RunItem(BaseModel):
@@ -139,6 +144,7 @@ class SingleTable:
         last_normalized_hash: Optional[str] = None,
         last_fetch_status: Optional[str] = None,
         last_fetched_at: Optional[str] = None,
+        last_part_key: Optional[str] = None,
     ) -> FeedStateItem:
         item = FeedStateItem(
             shop_id=shop_id,
@@ -148,6 +154,7 @@ class SingleTable:
             last_normalized_hash=last_normalized_hash,
             last_fetch_status=last_fetch_status,
             last_fetched_at=last_fetched_at,
+            last_part_key=last_part_key,
         )
         self.put_item(item)
         return item

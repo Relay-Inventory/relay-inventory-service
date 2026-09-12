@@ -21,6 +21,29 @@ def test_s3_adapter_round_trip() -> None:
 
 
 @mock_aws
+def test_s3_adapter_download_bytes_or_none_found() -> None:
+    import boto3
+
+    client = boto3.client("s3", region_name="us-east-1")
+    client.create_bucket(Bucket="test-bucket")
+
+    adapter = S3Adapter("test-bucket")
+    adapter.upload_bytes("snapshots/shop1/latest.parquet", b"parquet-bytes")
+    assert adapter.download_bytes_or_none("snapshots/shop1/latest.parquet") == b"parquet-bytes"
+
+
+@mock_aws
+def test_s3_adapter_download_bytes_or_none_missing_key_returns_none() -> None:
+    import boto3
+
+    client = boto3.client("s3", region_name="us-east-1")
+    client.create_bucket(Bucket="test-bucket")
+
+    adapter = S3Adapter("test-bucket")
+    assert adapter.download_bytes_or_none("snapshots/shop1/latest.parquet") is None
+
+
+@mock_aws
 def test_sqs_adapter_send_receive_delete() -> None:
     import boto3
 

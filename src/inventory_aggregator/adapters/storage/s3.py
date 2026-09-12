@@ -42,6 +42,16 @@ class S3Adapter:
         response = self.client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
 
+    def download_bytes_or_none(self, key: str) -> Optional[bytes]:
+        from botocore.exceptions import ClientError
+
+        try:
+            return self.download_bytes(key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                return None
+            raise
+
     def upload_text(self, key: str, body: str) -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body.encode("utf-8"))
 
