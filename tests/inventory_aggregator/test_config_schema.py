@@ -112,3 +112,84 @@ def test_tenant_config_plan_tier_defaults_to_standard() -> None:
         output=OutputConfig(columns=["sku"]),
     )
     assert tenant_config.plan_tier == "standard"
+
+
+def test_tenant_config_billing_fields_round_trip_through_config_item() -> None:
+    """COMMIT_PLAN.md Commit 4.7: plan_tier/founder_rate_expires_at need no DynamoDB schema
+    change -- ConfigItem.config is already an untyped dict (the "mega object" design). Confirms
+    a TenantConfig with these fields set serializes via .model_dump() into a ConfigItem and back
+    via TenantConfig.model_validate(item.config) with the values intact."""
+    from inventory_aggregator.app.models.config import (
+        BestOfferConfig,
+        BestOfferLandedCost,
+        MapPolicyConfig,
+        MergeConfig,
+        OutputConfig,
+        PricingConfig,
+        RoundingConfig,
+        TenantConfig,
+    )
+    from inventory_aggregator.persistence.single_table import ConfigItem
+
+    tenant_config = TenantConfig(
+        tenant_id="tenant-a",
+        timezone="UTC",
+        default_currency="USD",
+        vendors=[],
+        pricing=PricingConfig(
+            base_margin_pct=Decimal("0.2"),
+            min_price=Decimal("1"),
+            shipping_handling_flat=Decimal("0"),
+            map_policy=MapPolicyConfig(),
+            rounding=RoundingConfig(mode="nearest", increment=Decimal("0.01")),
+        ),
+        merge=MergeConfig(
+            strategy="best_offer",
+            best_offer=BestOfferConfig(sort_by=[], landed_cost=BestOfferLandedCost()),
+        ),
+        output=OutputConfig(columns=["sku"]),
+        plan_tier="founder",
+        founder_rate_expires_at="2027-01-01T00:00:00+00:00",
+    )
+
+    config_item = ConfigItem(
+        shop_id="shop-1", sk="CONFIG#0000000001", config_version=1, config=tenant_config.model_dump(),
+    )
+    round_tripped = TenantConfig.model_validate(config_item.config)
+
+    assert round_tripped.plan_tier == "founder"
+    assert round_tripped.founder_rate_expires_at == "2027-01-01T00:00:00+00:00"
+    assert round_tripped == tenant_config
+
+
+def test_tenant_config_founder_rate_expires_at_defaults_to_none() -> None:
+    from inventory_aggregator.app.models.config import (
+        BestOfferConfig,
+        BestOfferLandedCost,
+        MapPolicyConfig,
+        MergeConfig,
+        OutputConfig,
+        PricingConfig,
+        RoundingConfig,
+        TenantConfig,
+    )
+
+    tenant_config = TenantConfig(
+        tenant_id="tenant-a",
+        timezone="UTC",
+        default_currency="USD",
+        vendors=[],
+        pricing=PricingConfig(
+            base_margin_pct=Decimal("0.2"),
+            min_price=Decimal("1"),
+            shipping_handling_flat=Decimal("0"),
+            map_policy=MapPolicyConfig(),
+            rounding=RoundingConfig(mode="nearest", increment=Decimal("0.01")),
+        ),
+        merge=MergeConfig(
+            strategy="best_offer",
+            best_offer=BestOfferConfig(sort_by=[], landed_cost=BestOfferLandedCost()),
+        ),
+        output=OutputConfig(columns=["sku"]),
+    )
+    assert tenant_config.founder_rate_expires_at is None
