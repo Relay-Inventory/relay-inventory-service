@@ -107,6 +107,53 @@ def test_persist_and_record_promotes_candidate_and_writes_succeeded_run(aws) -> 
     assert run_item.artifacts["diff_summary"]["added_skus"] == 2
 
 
+def test_persist_and_record_records_write_status_from_write_to_shopify(aws) -> None:
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    result = handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 3,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": False,
+        "write_status": "PARTIAL",
+        "written_count": 4,
+        "write_errors": [{"sku": "SKU9", "error": "no_shopify_inventory_mapping"}],
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert result["status"] == "SUCCEEDED"
+    table = SingleTable(aws["table_name"])
+    run_item = table.get_item("shop1", run_sk("run-1"))
+    assert run_item.artifacts["write_status"] == "PARTIAL"
+    assert run_item.artifacts["written_count"] == 4
+    assert run_item.artifacts["write_errors"] == [{"sku": "SKU9", "error": "no_shopify_inventory_mapping"}]
+
+
+def test_persist_and_record_omits_write_fields_when_absent_eg_halted_run(aws) -> None:
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 3,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": True,
+        "reason": "60% of SKUs changed",
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    table = SingleTable(aws["table_name"])
+    run_item = table.get_item("shop1", run_sk("run-1"))
+    assert "write_status" not in run_item.artifacts
+    assert "written_count" not in run_item.artifacts
+    assert "write_errors" not in run_item.artifacts
+
+
 def test_persist_and_record_halted_run_does_not_create_latest_and_preserves_reason(aws) -> None:
     s3 = S3Adapter(aws["bucket"])
     s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")

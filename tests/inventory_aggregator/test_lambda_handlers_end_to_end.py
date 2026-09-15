@@ -41,7 +41,15 @@ from moto import mock_aws
 from inventory_aggregator.adapters.storage.s3 import S3Adapter
 from inventory_aggregator.app.config.loader import load_tenant_config
 from inventory_aggregator.engine.canonical.io import read_parquet_bytes, write_parquet_bytes
-from inventory_aggregator.lambda_handlers import diff_and_safety, fetch_and_hash, load_config, merge, persist_and_record
+from inventory_aggregator.lambda_handlers import (
+    diff_and_safety,
+    fetch_and_hash,
+    load_config,
+    merge,
+    persist_and_record,
+    write_to_shopify,
+)
+from inventory_aggregator.lambda_handlers import write_to_shopify as write_to_shopify_module
 from inventory_aggregator.persistence.single_table import SingleTable, run_sk
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "three_vendor_overlap"
@@ -226,3 +234,87 @@ def test_end_to_end_ordinary_run_against_existing_baseline_succeeds_and_promotes
     assert run_item is not None
     assert run_item.status == "SUCCEEDED"
     assert run_item.artifacts["snapshot_key"] == context["snapshot_key"]
+
+
+class _FakeAdminClient:
+    """Stands in for ShopifyAdminClient for this full-chain test -- no real gql transport,
+    no real network. Every quantity in the request is reported as successfully changed."""
+
+    def __init__(self, shop_domain: str, access_token: str) -> None:
+        self.shop_domain = shop_domain
+        self.access_token = access_token
+
+    def execute(self, query: str, variable_values: dict | None = None) -> dict:
+        quantities = variable_values["input"]["quantities"]
+        return {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": {
+                    "changes": [{"name": "available", "delta": q["quantity"]} for q in quantities]
+                },
+                "userErrors": [],
+            }
+        }
+
+
+def test_end_to_end_not_halted_run_writes_to_shopify_before_persisting(
+    aws, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extends the chain one step further than the other two end-to-end tests: the
+    Choice(halted?) branch in the real state machine (COMMIT_PLAN.md Commit 4.3) only calls
+    WriteToShopify when DiffAndSafety did not halt -- this proves that branch end to end,
+    including PersistAndRecord recording the write outcome on the RUN# item afterward."""
+    monkeypatch.setattr(write_to_shopify_module, "ShopifyAdminClient", _FakeAdminClient)
+
+    secrets_client = boto3.client("secretsmanager", region_name="us-east-1")
+    secrets_client.create_secret(
+        Name=f"inventory-aggregator/{SHOP_ID}/shopify-access-token",
+        SecretString="test-access-token",
+    )
+
+    s3 = S3Adapter(BUCKET)
+    single_table = SingleTable(TABLE_NAME)
+
+    config = load_tenant_config(FIXTURE_DIR / "tenant_config.yaml")
+    config_dict = config.model_dump(mode="json")
+    config_dict["location_id"] = "gid://shopify/Location/1"
+    single_table.put_config(SHOP_ID, config_dict, version=1)
+
+    context = _run_load_through_merge(s3, single_table)
+    candidate_df = read_parquet_bytes(s3.download_bytes(context["snapshot_key"]))
+    for sku in candidate_df["sku"]:
+        single_table.put_sku_mapping(SHOP_ID, sku, f"gid://shopify/InventoryItem/{sku}")
+
+    diff_result = diff_and_safety.handler({
+        "shop_id": SHOP_ID, "snapshot_key": context["snapshot_key"], "bucket": BUCKET,
+    })
+    assert diff_result["halted"] is False  # first run -- the is_first_run exemption applies
+
+    tenant_config_for_write = single_table.get_config(SHOP_ID, context["config_version"]).config
+    write_result = write_to_shopify.handler({
+        "shop_id": SHOP_ID,
+        "snapshot_key": context["snapshot_key"],
+        "tenant_config": tenant_config_for_write,
+        "bucket": BUCKET,
+        "table_name": TABLE_NAME,
+    })
+    assert write_result["write_status"] == "SUCCEEDED"
+    assert write_result["written_count"] == len(candidate_df)
+    assert write_result["errors"] == []
+
+    persist_result = persist_and_record.handler({
+        **context,
+        "halted": diff_result["halted"],
+        "reason": diff_result["reason"],
+        "diff_summary": diff_result["diff_summary"],
+        "write_status": write_result["write_status"],
+        "written_count": write_result["written_count"],
+        "write_errors": write_result["errors"],
+        "bucket": BUCKET,
+        "table_name": TABLE_NAME,
+    })
+    assert persist_result["status"] == "SUCCEEDED"
+
+    run_item = single_table.get_item(SHOP_ID, run_sk(context["run_id"]))
+    assert run_item.artifacts["write_status"] == "SUCCEEDED"
+    assert run_item.artifacts["written_count"] == len(candidate_df)
+    assert "write_errors" not in run_item.artifacts

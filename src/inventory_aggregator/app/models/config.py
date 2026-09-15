@@ -133,3 +133,11 @@ class TenantConfig(BaseModel):
     4.7. None for standard-tier shops, and for founder shops grandfathered indefinitely. No
     billing-provider API integration reads or writes this yet (deferred to Phase 5) -- it just
     needs to round-trip correctly through ConfigItem.config, same as plan_tier."""
+    location_id: Optional[str] = None
+    """Shopify location GID (e.g. "gid://shopify/Location/1"), required only by the write step
+    (lambda_handlers/write_to_shopify.py, COMMIT_PLAN.md Commit 4.3) -- Optional here rather than
+    required so the dry-run-only pipeline (Phases 1-3, and every shop still mid-trial) never needs
+    it. Single-location per shop only; multi-location support is out of scope until a real
+    merchant needs it. write_to_shopify.py raises explicitly if this is unset when a write is
+    actually attempted, matching load_config.py's "no sensible skip" behavior for missing
+    required-at-that-stage config."""

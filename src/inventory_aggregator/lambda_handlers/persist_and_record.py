@@ -59,6 +59,9 @@ def handler(event: dict, context=None) -> dict:
     halted = event["halted"]
     reason = event.get("reason")
     diff_summary = event.get("diff_summary")
+    write_status = event.get("write_status")
+    written_count = event.get("written_count")
+    write_errors = event.get("write_errors")
 
     bucket = event.get("bucket") or os.environ["ARTIFACT_BUCKET"]
     s3 = S3Adapter(bucket)
@@ -80,7 +83,13 @@ def handler(event: dict, context=None) -> dict:
         config_version=config_version,
         failed_stage="DiffAndSafety" if halted else None,
         error_message=reason,
-        artifacts={"snapshot_key": snapshot_key, **({"diff_summary": diff_summary} if diff_summary else {})},
+        artifacts={
+            "snapshot_key": snapshot_key,
+            **({"diff_summary": diff_summary} if diff_summary else {}),
+            **({"write_status": write_status} if write_status else {}),
+            **({"written_count": written_count} if written_count is not None else {}),
+            **({"write_errors": write_errors} if write_errors else {}),
+        },
     )
     table.put_run(shop_id, run_item)
 
