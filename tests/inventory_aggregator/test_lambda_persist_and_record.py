@@ -106,3 +106,70 @@ def test_persist_and_record_halted_run_leaves_existing_latest_untouched(aws) -> 
 
     assert result["status"] == "HALTED"
     assert s3.download_bytes("snapshots/shop1/latest.parquet") == b"old-latest-bytes"
+
+
+def test_persist_and_record_email_failure_does_not_change_run_status(aws, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test for COMMIT_PLAN.md Commit 4.5: an email provider failure must never
+    propagate out of the handler or alter the run's own already-recorded status."""
+
+    class RaisingEmailSender:
+        def send(self, subject: str, html_body: str, *, to=None) -> None:
+            raise RuntimeError("email provider had a bad moment")
+
+    monkeypatch.setattr(
+        "inventory_aggregator.lambda_handlers.persist_and_record.LoggingEmailSender",
+        RaisingEmailSender,
+    )
+
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    result = handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 3,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": False,
+        "diff_summary": {"added_skus": 2, "removed_skus": 0, "changed_count": 0, "unchanged_count": 10},
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert result["status"] == "SUCCEEDED"
+
+    table = SingleTable(aws["table_name"])
+    run_item = table.get_item("shop1", run_sk("run-1"))
+    assert run_item is not None
+    assert run_item.status == "SUCCEEDED"
+
+
+def test_persist_and_record_email_failure_does_not_change_halted_status(aws, monkeypatch: pytest.MonkeyPatch) -> None:
+    class RaisingEmailSender:
+        def send(self, subject: str, html_body: str, *, to=None) -> None:
+            raise RuntimeError("email provider had a bad moment")
+
+    monkeypatch.setattr(
+        "inventory_aggregator.lambda_handlers.persist_and_record.LoggingEmailSender",
+        RaisingEmailSender,
+    )
+
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    result = handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 1,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": True,
+        "reason": "80% of SKUs changed (threshold 50%)",
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert result["status"] == "HALTED"
+
+    table = SingleTable(aws["table_name"])
+    run_item = table.get_item("shop1", run_sk("run-1"))
+    assert run_item is not None
+    assert run_item.status == "HALTED"

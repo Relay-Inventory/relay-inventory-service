@@ -30,6 +30,7 @@ pydantic = "*"
 pyyaml = "*"
 fastapi = "*"
 uvicorn = "*"
+jinja2 = "*"
 
 [dev-packages]
 pytest = "*"

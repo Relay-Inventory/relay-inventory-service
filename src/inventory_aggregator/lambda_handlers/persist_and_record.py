@@ -1,9 +1,39 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from inventory_aggregator.adapters.storage.s3 import S3Adapter
+from inventory_aggregator.notifications.diff_email import render_diff_email
+from inventory_aggregator.notifications.send_email import EmailSender, LoggingEmailSender
 from inventory_aggregator.persistence.single_table import RunItem, SingleTable, run_sk
+
+logger = logging.getLogger(__name__)
+
+
+def _send_diff_email(
+    table: SingleTable,
+    run_item: RunItem,
+    diff_summary: dict | None,
+    safety_reason: str | None,
+    email_sender: EmailSender,
+    *,
+    over_vendor_cap: bool = False,
+) -> None:
+    """Best-effort notification for both SUCCEEDED and HALTED runs (COMMIT_PLAN.md Commit 4.5 --
+    "the merchant should hear it from you, never from a customer"). An email provider failure
+    must NEVER change the run's own already-recorded status -- caught and logged here, never
+    re-raised."""
+    try:
+        subject, body = render_diff_email(
+            run_item, diff_summary, safety_reason, table=table, over_vendor_cap=over_vendor_cap,
+        )
+        email_sender.send(subject, body)
+    except Exception:
+        logger.exception(
+            "diff email failed for shop_id=%s run_id=%s -- run status (%s) unaffected",
+            run_item.shop_id, run_item.run_id, run_item.status,
+        )
 
 
 def handler(event: dict, context=None) -> dict:
@@ -38,5 +68,7 @@ def handler(event: dict, context=None) -> dict:
         artifacts={"snapshot_key": snapshot_key, **({"diff_summary": diff_summary} if diff_summary else {})},
     )
     table.put_run(shop_id, run_item)
+
+    _send_diff_email(table, run_item, diff_summary, reason, LoggingEmailSender())
 
     return {"status": run_item.status}
