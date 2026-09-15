@@ -122,3 +122,8 @@ class TenantConfig(BaseModel):
     merge: MergeConfig
     output: OutputConfig
     error_policy: ErrorPolicy = Field(default_factory=ErrorPolicy)
+    plan_tier: str = "standard"
+    """"standard" ($99/mo) or "founder" ($49/mo, first 10 signups only) -- COMMIT_PLAN.md
+    Commit 4.6. Billing-provider integration itself is out of scope here (deferred to Phase 5);
+    this field just gives Commit 4.6's vendor-cap check and a future billing UI a shared source
+    of truth. Defaults to "standard" so existing fixtures/configs don't need updating."""

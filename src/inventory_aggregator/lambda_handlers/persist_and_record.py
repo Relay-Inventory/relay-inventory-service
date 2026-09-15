@@ -4,11 +4,26 @@ import logging
 import os
 
 from inventory_aggregator.adapters.storage.s3 import S3Adapter
+from inventory_aggregator.app.models.config import TenantConfig
+from inventory_aggregator.billing.limits import is_over_vendor_cap
 from inventory_aggregator.notifications.diff_email import render_diff_email
 from inventory_aggregator.notifications.send_email import EmailSender, LoggingEmailSender
 from inventory_aggregator.persistence.single_table import RunItem, SingleTable, run_sk
 
 logger = logging.getLogger(__name__)
+
+
+def _is_over_vendor_cap_for_run(table: SingleTable, shop_id: str, config_version: int) -> bool:
+    """Looks up the exact CONFIG# version this run was pinned to (never "latest" -- a run must
+    be judged against the config it actually ran with) and checks it against the vendor soft
+    cap (billing/limits.py). Missing config (shouldn't happen for a run that got this far, but
+    not this function's job to raise about it) is treated as not-over-cap rather than failing
+    the run."""
+    config_item = table.get_config(shop_id, config_version)
+    if config_item is None:
+        return False
+    tenant_config = TenantConfig.model_validate(config_item.config)
+    return is_over_vendor_cap(tenant_config)
 
 
 def _send_diff_email(
@@ -69,6 +84,9 @@ def handler(event: dict, context=None) -> dict:
     )
     table.put_run(shop_id, run_item)
 
-    _send_diff_email(table, run_item, diff_summary, reason, LoggingEmailSender())
+    over_vendor_cap = _is_over_vendor_cap_for_run(table, shop_id, config_version)
+    _send_diff_email(
+        table, run_item, diff_summary, reason, LoggingEmailSender(), over_vendor_cap=over_vendor_cap,
+    )
 
     return {"status": run_item.status}

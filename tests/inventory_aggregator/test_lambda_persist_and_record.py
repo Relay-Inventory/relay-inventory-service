@@ -1,10 +1,56 @@
+from decimal import Decimal
+
 import boto3
 import pytest
 from moto import mock_aws
 
 from inventory_aggregator.adapters.storage.s3 import S3Adapter
+from inventory_aggregator.app.models.config import (
+    BestOfferConfig,
+    BestOfferLandedCost,
+    InboundConfig,
+    MapPolicyConfig,
+    MergeConfig,
+    OutputConfig,
+    ParserConfig,
+    PricingConfig,
+    RoundingConfig,
+    TenantConfig,
+    VendorConfig,
+)
+from inventory_aggregator.billing.limits import MAX_VENDORS_SOFT_CAP
+from inventory_aggregator.lambda_handlers import persist_and_record as persist_and_record_module
 from inventory_aggregator.lambda_handlers.persist_and_record import handler
 from inventory_aggregator.persistence.single_table import SingleTable, run_sk
+
+
+def _vendor(vendor_id: str) -> VendorConfig:
+    return VendorConfig(
+        vendor_id=vendor_id,
+        inbound=InboundConfig(type="s3", s3_prefix="prefix/"),
+        parser=ParserConfig(format="csv"),
+    )
+
+
+def _tenant_config(vendor_count: int) -> TenantConfig:
+    return TenantConfig(
+        tenant_id="tenant-a",
+        timezone="UTC",
+        default_currency="USD",
+        vendors=[_vendor(f"v{i}") for i in range(vendor_count)],
+        pricing=PricingConfig(
+            base_margin_pct=Decimal("0.2"),
+            min_price=Decimal("1"),
+            shipping_handling_flat=Decimal("0"),
+            map_policy=MapPolicyConfig(),
+            rounding=RoundingConfig(mode="nearest", increment=Decimal("0.01")),
+        ),
+        merge=MergeConfig(
+            strategy="best_offer",
+            best_offer=BestOfferConfig(sort_by=[], landed_cost=BestOfferLandedCost()),
+        ),
+        output=OutputConfig(columns=["sku"]),
+    )
 
 
 @pytest.fixture()
@@ -173,3 +219,86 @@ def test_persist_and_record_email_failure_does_not_change_halted_status(aws, mon
     run_item = table.get_item("shop1", run_sk("run-1"))
     assert run_item is not None
     assert run_item.status == "HALTED"
+
+
+def test_persist_and_record_over_vendor_cap_flag_reaches_diff_email(aws, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test for COMMIT_PLAN.md Commit 4.6: a shop configured with more than
+    MAX_VENDORS_SOFT_CAP vendors must have over_vendor_cap=True reach render_diff_email's call,
+    without halting the run."""
+    captured: dict = {}
+    original_render = persist_and_record_module.render_diff_email
+
+    def _spy_render(*args, **kwargs):
+        captured["over_vendor_cap"] = kwargs.get("over_vendor_cap")
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(persist_and_record_module, "render_diff_email", _spy_render)
+
+    table = SingleTable(aws["table_name"])
+    tenant_config = _tenant_config(MAX_VENDORS_SOFT_CAP + 1)
+    table.put_config("shop1", tenant_config.model_dump(), version=3)
+
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    result = handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 3,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": False,
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert result["status"] == "SUCCEEDED"
+    assert captured["over_vendor_cap"] is True
+
+
+def test_persist_and_record_under_vendor_cap_flag_is_false(aws, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+    original_render = persist_and_record_module.render_diff_email
+
+    def _spy_render(*args, **kwargs):
+        captured["over_vendor_cap"] = kwargs.get("over_vendor_cap")
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(persist_and_record_module, "render_diff_email", _spy_render)
+
+    table = SingleTable(aws["table_name"])
+    tenant_config = _tenant_config(3)
+    table.put_config("shop1", tenant_config.model_dump(), version=3)
+
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 3,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": False,
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert captured["over_vendor_cap"] is False
+
+
+def test_persist_and_record_missing_config_treated_as_not_over_cap(aws) -> None:
+    """No CONFIG# item exists for this shop_id/version (shouldn't happen in practice for a run
+    that reached this stage, but the handler must not crash over it)."""
+    s3 = S3Adapter(aws["bucket"])
+    s3.upload_bytes("snapshots/shop1/run-1.parquet", b"candidate-bytes")
+
+    result = handler({
+        "shop_id": "shop1",
+        "run_id": "run-1",
+        "config_version": 99,
+        "snapshot_key": "snapshots/shop1/run-1.parquet",
+        "halted": False,
+        "bucket": aws["bucket"],
+        "table_name": aws["table_name"],
+    })
+
+    assert result["status"] == "SUCCEEDED"
