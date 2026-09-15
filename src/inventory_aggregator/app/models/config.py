@@ -123,3 +123,13 @@ class TenantConfig(BaseModel):
     merge: MergeConfig
     output: OutputConfig
     error_policy: ErrorPolicy = Field(default_factory=ErrorPolicy)
+    plan_tier: str = "standard"
+    """"standard" ($99/mo) or "founder" ($49/mo, first 10 signups only) -- COMMIT_PLAN.md
+    Commit 4.6. Billing-provider integration itself is out of scope here (deferred to Phase 5);
+    this field just gives Commit 4.6's vendor-cap check and a future billing UI a shared source
+    of truth. Defaults to "standard" so existing fixtures/configs don't need updating."""
+    founder_rate_expires_at: Optional[str] = None
+    """ISO8601 timestamp, only meaningful when plan_tier == "founder" -- COMMIT_PLAN.md Commit
+    4.7. None for standard-tier shops, and for founder shops grandfathered indefinitely. No
+    billing-provider API integration reads or writes this yet (deferred to Phase 5) -- it just
+    needs to round-trip correctly through ConfigItem.config, same as plan_tier."""
