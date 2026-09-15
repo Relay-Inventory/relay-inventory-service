@@ -15,6 +15,7 @@ def _base_config(encoding: str) -> TenantConfig:
             "tenant_id": "tenant-a",
             "timezone": "UTC",
             "default_currency": "USD",
+            "shopify_domain": "tenant-a.myshopify.com",
             "vendors": [
                 {
                     "vendor_id": "vendor-a",
