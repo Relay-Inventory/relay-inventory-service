@@ -66,6 +66,25 @@ def test_evaluate_safety_trips_max_qty_drop_pct() -> None:
     assert "threshold 50%" in decision.reason
 
 
+def test_evaluate_safety_first_run_never_halts_on_changed_sku_pct() -> None:
+    """Regression test for a real bug found while building Phase 3's end-to-end pipeline
+    test: a shop's literal first-ever run has no previous snapshot, so diff_snapshots marks
+    every SKU as "added" -- which, without this exemption, always computes changed_pct=100%
+    and halts every first run unconditionally. Since a halted run never promotes a snapshot,
+    that made it impossible for any shop to ever reach a successful baseline at all. previous
+    is None -> diff.is_first_run is True -> the max_changed_sku_pct check must be skipped."""
+    diff = SnapshotDiff(
+        added_skus=[f"SKU{i}" for i in range(20)],
+        removed_skus=[],
+        changed=_changed_df([]),
+        unchanged_count=0,
+        is_first_run=True,
+    )
+    decision = evaluate_safety(diff, SafetyThresholds(), previous_total_qty=0, current_total_qty=500)
+    assert decision.halted is False
+    assert decision.reason is None
+
+
 def test_evaluate_safety_normal_small_diff_passes() -> None:
     diff = SnapshotDiff(
         added_skus=["NEW1"],

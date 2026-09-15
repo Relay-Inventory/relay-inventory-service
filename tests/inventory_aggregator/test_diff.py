@@ -19,6 +19,14 @@ def test_diff_first_run_treats_everything_as_added() -> None:
     assert result.removed_skus == []
     assert result.changed.empty
     assert result.unchanged_count == 0
+    assert result.is_first_run is True
+
+
+def test_diff_non_first_run_has_is_first_run_false() -> None:
+    previous = _snapshot([{"sku": "SKU1", "available_qty": 5, "source_vendor_id": "a"}])
+    current = _snapshot([{"sku": "SKU1", "available_qty": 5, "source_vendor_id": "a"}])
+    result = diff_snapshots(previous, current)
+    assert result.is_first_run is False
 
 
 def test_diff_first_run_with_empty_previous_dataframe_treats_everything_as_added() -> None:
