@@ -117,6 +117,7 @@ class TenantConfig(BaseModel):
     tenant_id: str
     timezone: str
     default_currency: str
+    shopify_domain: str
     vendors: List[VendorConfig]
     pricing: PricingConfig
     merge: MergeConfig

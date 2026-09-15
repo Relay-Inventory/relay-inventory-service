@@ -63,6 +63,7 @@ def _base_config(error_policy: dict, *, vendor_required: bool = True) -> dict:
         "tenant_id": "tenant-a",
         "timezone": "UTC",
         "default_currency": "USD",
+        "shopify_domain": "tenant-a.myshopify.com",
         "vendors": [
             {
                 "vendor_id": "vendor-a",

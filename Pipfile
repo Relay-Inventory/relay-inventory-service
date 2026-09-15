@@ -30,6 +30,8 @@ pydantic = "*"
 pyyaml = "*"
 fastapi = "*"
 uvicorn = "*"
+gql = { extras = ["httpx"], version = "*" }
+tenacity = "*"
 
 [dev-packages]
 pytest = "*"

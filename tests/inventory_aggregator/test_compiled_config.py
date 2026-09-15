@@ -37,6 +37,7 @@ def _tenant_config(vendors) -> TenantConfig:
         tenant_id="tenant-1",
         timezone="UTC",
         default_currency="USD",
+        shopify_domain="tenant-1.myshopify.com",
         vendors=vendors,
         pricing=_pricing(),
         merge=MergeConfig(strategy="best_offer"),

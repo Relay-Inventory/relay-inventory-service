@@ -85,6 +85,7 @@ def test_tenant_record_config_survives_put_get_roundtrip_with_decimal_fields(
         tenant_id="tenant-decimal",
         timezone="UTC",
         default_currency="USD",
+        shopify_domain="tenant-decimal.myshopify.com",
         vendors=[
             VendorConfig(
                 vendor_id="vendor-a",

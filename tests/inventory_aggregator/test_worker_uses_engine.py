@@ -74,6 +74,7 @@ def test_worker_calls_engine(monkeypatch):
         "tenant_id": "tenant-a",
         "timezone": "UTC",
         "default_currency": "USD",
+        "shopify_domain": "tenant-a.myshopify.com",
         "vendors": [
             {
                 "vendor_id": "vendor-a",
@@ -160,6 +161,7 @@ def test_worker_reports_decode_error() -> None:
         "tenant_id": "tenant-a",
         "timezone": "UTC",
         "default_currency": "USD",
+        "shopify_domain": "tenant-a.myshopify.com",
         "vendors": [
             {
                 "vendor_id": "vendor-a",
@@ -203,6 +205,7 @@ def test_worker_uses_pinned_config_version(monkeypatch) -> None:
         "tenant_id": "tenant-a",
         "timezone": "UTC",
         "default_currency": "USD",
+        "shopify_domain": "tenant-a.myshopify.com",
         "vendors": [
             {
                 "vendor_id": "vendor-a",
