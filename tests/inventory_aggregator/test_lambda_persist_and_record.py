@@ -35,6 +35,7 @@ def _vendor(vendor_id: str) -> VendorConfig:
 def _tenant_config(vendor_count: int) -> TenantConfig:
     return TenantConfig(
         tenant_id="tenant-a",
+        shopify_domain="tenant-a.myshopify.com",
         timezone="UTC",
         default_currency="USD",
         vendors=[_vendor(f"v{i}") for i in range(vendor_count)],

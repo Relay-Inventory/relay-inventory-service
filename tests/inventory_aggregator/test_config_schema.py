@@ -95,6 +95,7 @@ def test_tenant_config_plan_tier_defaults_to_standard() -> None:
 
     tenant_config = TenantConfig(
         tenant_id="tenant-a",
+        shopify_domain="tenant-a.myshopify.com",
         timezone="UTC",
         default_currency="USD",
         vendors=[],
@@ -133,6 +134,7 @@ def test_tenant_config_billing_fields_round_trip_through_config_item() -> None:
 
     tenant_config = TenantConfig(
         tenant_id="tenant-a",
+        shopify_domain="tenant-a.myshopify.com",
         timezone="UTC",
         default_currency="USD",
         vendors=[],
@@ -176,6 +178,7 @@ def test_tenant_config_founder_rate_expires_at_defaults_to_none() -> None:
 
     tenant_config = TenantConfig(
         tenant_id="tenant-a",
+        shopify_domain="tenant-a.myshopify.com",
         timezone="UTC",
         default_currency="USD",
         vendors=[],
