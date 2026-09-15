@@ -2,6 +2,7 @@ schema_version: 1
 tenant_id: "three_vendor_overlap"
 timezone: "America/Los_Angeles"
 default_currency: "USD"
+shopify_domain: "three-vendor-overlap.myshopify.com"
 
 vendors:
   - vendor_id: "vendor_1"

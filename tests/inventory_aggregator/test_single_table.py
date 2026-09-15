@@ -7,9 +7,11 @@ from inventory_aggregator.persistence.single_table import (
     FeedStateItem,
     RunItem,
     SingleTable,
+    SkuMapItem,
     config_sk,
     feed_state_sk,
     run_sk,
+    sku_map_sk,
 )
 
 
@@ -63,6 +65,21 @@ def test_run_put_get_roundtrip(table_name: str) -> None:
     assert isinstance(fetched, RunItem)
     assert fetched.run_id == "run-1"
     assert fetched.status == "SUCCEEDED"
+
+
+def test_sku_map_put_get_roundtrip(table_name: str) -> None:
+    st = SingleTable(table_name)
+    st.put_sku_mapping("shop-1", "SKU1", "gid://shopify/InventoryItem/111")
+    fetched = st.get_sku_mapping("shop-1", "SKU1")
+    assert fetched is not None
+    assert isinstance(fetched, SkuMapItem)
+    assert fetched.shopify_inventory_item_id == "gid://shopify/InventoryItem/111"
+    assert fetched.sk == sku_map_sk("SKU1")
+
+
+def test_sku_map_get_returns_none_when_unmapped(table_name: str) -> None:
+    st = SingleTable(table_name)
+    assert st.get_sku_mapping("shop-1", "SKU-UNKNOWN") is None
 
 
 def test_get_latest_config_orders_by_version_not_lexicographic_string(table_name: str) -> None:

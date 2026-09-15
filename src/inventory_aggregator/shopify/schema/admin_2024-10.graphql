@@ -1,0 +1,67 @@
+# Shopify Admin API GraphQL schema -- 2024-10 -- HAND-WRITTEN MINIMAL SUBSET.
+#
+# This is NOT Shopify's real, full Admin API schema. This repo has no network access to
+# fetch it, so this file defines just enough types to let `gql`'s local schema validation
+# (see ShopifyAdminClient in client.py) actually catch malformed queries before they hit
+# the network: the one write mutation this service uses (`inventorySetQuantities`) plus
+# the small read queries exercised in this package's own tests.
+#
+# Swapping in Shopify's real schema later is a drop-in file replacement: download the
+# real schema (e.g. via the Shopify CLI or GraphQL introspection) and save it over this
+# same path, `src/inventory_aggregator/shopify/schema/admin_2024-10.graphql` -- nothing
+# else in this package needs to change, since ShopifyAdminClient just reads whatever SDL
+# text lives at this path.
+
+schema {
+  query: QueryRoot
+  mutation: MutationRoot
+}
+
+type QueryRoot {
+  shop: Shop!
+}
+
+type Shop {
+  id: ID!
+  name: String!
+  myshopifyDomain: String!
+}
+
+type MutationRoot {
+  inventorySetQuantities(input: InventorySetQuantitiesInput!): InventorySetQuantitiesPayload!
+}
+
+input InventorySetQuantitiesInput {
+  reason: String!
+  name: String!
+  ignoreCompareQuantity: Boolean
+  quantities: [InventoryQuantityInput!]!
+}
+
+input InventoryQuantityInput {
+  inventoryItemId: ID!
+  locationId: ID!
+  quantity: Int!
+  compareQuantity: Int
+}
+
+type InventorySetQuantitiesPayload {
+  inventoryAdjustmentGroup: InventoryAdjustmentGroup
+  userErrors: [UserError!]!
+}
+
+type InventoryAdjustmentGroup {
+  createdAt: String
+  reason: String
+  changes: [InventoryChange!]!
+}
+
+type InventoryChange {
+  name: String!
+  delta: Int!
+}
+
+type UserError {
+  field: [String!]
+  message: String!
+}

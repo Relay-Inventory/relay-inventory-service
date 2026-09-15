@@ -52,6 +52,7 @@ def _tenant_config() -> TenantConfig:
         tenant_id="shop-1",
         timezone="UTC",
         default_currency="USD",
+        shopify_domain="shop-1.myshopify.com",
         vendors=[],
         pricing=PricingConfig(
             base_margin_pct=Decimal("0.1"),

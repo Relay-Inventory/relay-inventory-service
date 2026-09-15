@@ -117,8 +117,27 @@ class TenantConfig(BaseModel):
     tenant_id: str
     timezone: str
     default_currency: str
+    shopify_domain: str
     vendors: List[VendorConfig]
     pricing: PricingConfig
     merge: MergeConfig
     output: OutputConfig
     error_policy: ErrorPolicy = Field(default_factory=ErrorPolicy)
+    plan_tier: str = "standard"
+    """"standard" ($99/mo) or "founder" ($49/mo, first 10 signups only) -- COMMIT_PLAN.md
+    Commit 4.6. Billing-provider integration itself is out of scope here (deferred to Phase 5);
+    this field just gives Commit 4.6's vendor-cap check and a future billing UI a shared source
+    of truth. Defaults to "standard" so existing fixtures/configs don't need updating."""
+    founder_rate_expires_at: Optional[str] = None
+    """ISO8601 timestamp, only meaningful when plan_tier == "founder" -- COMMIT_PLAN.md Commit
+    4.7. None for standard-tier shops, and for founder shops grandfathered indefinitely. No
+    billing-provider API integration reads or writes this yet (deferred to Phase 5) -- it just
+    needs to round-trip correctly through ConfigItem.config, same as plan_tier."""
+    location_id: Optional[str] = None
+    """Shopify location GID (e.g. "gid://shopify/Location/1"), required only by the write step
+    (lambda_handlers/write_to_shopify.py, COMMIT_PLAN.md Commit 4.3) -- Optional here rather than
+    required so the dry-run-only pipeline (Phases 1-3, and every shop still mid-trial) never needs
+    it. Single-location per shop only; multi-location support is out of scope until a real
+    merchant needs it. write_to_shopify.py raises explicitly if this is unset when a write is
+    actually attempted, matching load_config.py's "no sensible skip" behavior for missing
+    required-at-that-stage config."""

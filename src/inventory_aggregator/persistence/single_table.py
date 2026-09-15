@@ -9,6 +9,7 @@ from pydantic import BaseModel
 CONFIG_PREFIX = "CONFIG#"
 FEED_STATE_PREFIX = "FEED_STATE#"
 RUN_PREFIX = "RUN#"
+SKU_MAP_PREFIX = "SKU_MAP#"
 
 # Zero-padded so lexicographic sort (how DynamoDB compares string sort keys) matches numeric
 # sort -- "CONFIG#10" sorts *before* "CONFIG#2" without this, which would silently break
@@ -62,10 +63,28 @@ class RunItem(BaseModel):
     artifacts: Optional[dict] = None
 
 
+class SkuMapItem(BaseModel):
+    """Maps this shop's internal SKU to the Shopify inventory item it corresponds to, so the
+    write step (lambda_handlers/write_to_shopify.py, Commit 4.3) can call `inventorySetQuantities`
+    -- that mutation requires Shopify's own `inventoryItemId` GID, which our canonical snapshot
+    never carries (it only knows the SKU string). Populated by a separate, not-yet-built sync
+    that resolves each SKU against Shopify's `productVariants` once (e.g. during/after OAuth
+    install, or an on-demand backfill) -- a real, named gap, not silently assumed solved. A SKU
+    with no mapping yet is a normal, expected state (not every SKU may exist in Shopify yet),
+    handled by write_to_shopify.py skipping it and recording a per-SKU error rather than failing
+    the whole run."""
+
+    shop_id: str
+    sk: str
+    sku: str
+    shopify_inventory_item_id: str
+
+
 _SK_PREFIX_MODELS: dict[str, Type[BaseModel]] = {
     CONFIG_PREFIX: ConfigItem,
     FEED_STATE_PREFIX: FeedStateItem,
     RUN_PREFIX: RunItem,
+    SKU_MAP_PREFIX: SkuMapItem,
 }
 
 
@@ -79,6 +98,10 @@ def feed_state_sk(vendor_id: str, feed_id: str) -> str:
 
 def run_sk(run_id_iso8601: str) -> str:
     return f"{RUN_PREFIX}{run_id_iso8601}"
+
+
+def sku_map_sk(sku: str) -> str:
+    return f"{SKU_MAP_PREFIX}{sku}"
 
 
 def _model_for_sk(sk: str) -> Type[BaseModel]:
@@ -171,3 +194,16 @@ class SingleTable:
         """Defaults to most-recent-first, since ISO8601 timestamps sort correctly
         lexicographically -- no zero-padding trick needed here, unlike CONFIG#."""
         return self.query(shop_id, RUN_PREFIX, scan_index_forward=scan_index_forward, limit=limit)
+
+    # --- SKU_MAP# convenience methods ---
+
+    def put_sku_mapping(self, shop_id: str, sku: str, shopify_inventory_item_id: str) -> SkuMapItem:
+        item = SkuMapItem(
+            shop_id=shop_id, sk=sku_map_sk(sku), sku=sku,
+            shopify_inventory_item_id=shopify_inventory_item_id,
+        )
+        self.put_item(item)
+        return item
+
+    def get_sku_mapping(self, shop_id: str, sku: str) -> Optional[SkuMapItem]:
+        return self.get_item(shop_id, sku_map_sk(sku))
